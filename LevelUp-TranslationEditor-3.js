@@ -889,6 +889,7 @@
                         
                         // FALLBACK: If labels are missing from FormXML, get them from field metadata
                         var metadata = fieldMetadata[dataField.toLowerCase()];
+                        var usedFallback = false;
                         if (metadata) {
                             if (!baseLabel || baseLabel.trim() === "") {
                                 baseLabel = labelText(metadata, state.orgLcid, "");
@@ -896,7 +897,10 @@
                             }
                             if (!targetLabel || targetLabel.trim() === "") {
                                 targetLabel = labelText(metadata, state.targetLcid, "");
-                                if (targetLabel) console.log("Field metadata fallback for targetLabel:", dataField, "->", targetLabel);
+                                if (targetLabel) {
+                                    console.log("Field metadata fallback for targetLabel:", dataField, "->", targetLabel);
+                                    usedFallback = true; // Mark that target came from metadata
+                                }
                             }
                             if (!userLabel || userLabel.trim() === "") {
                                 userLabel = labelText(metadata, state.userLcid, dataField);
@@ -915,7 +919,8 @@
                             targetDescription: "",
                             newLabel: targetLabel,
                             newDescription: "",
-                            elementType: "cell"
+                            elementType: "cell",
+                            usedMetadataFallback: usedFallback // Track if this came from metadata
                         });
                     }
                     
@@ -2035,6 +2040,102 @@
         
         console.log("saveFormLabelTranslations - lcid:", lcid, "updates:", updates.length);
         
+        // Separate updates into FormXML updates and field metadata updates
+        var formXmlUpdates = [];
+        var fieldMetadataUpdates = [];
+        
+        for (var i = 0; i < updates.length; i++) {
+            if (updates[i].elementType === "cell" && updates[i].usedMetadataFallback) {
+                // This label came from field metadata fallback, so save it to field metadata
+                fieldMetadataUpdates.push(updates[i]);
+                console.log("Will save to field metadata:", updates[i].logicalName);
+            } else {
+                // This label is in FormXML, so save it to FormXML
+                formXmlUpdates.push(updates[i]);
+            }
+        }
+        
+        console.log("FormXML updates:", formXmlUpdates.length, "Field metadata updates:", fieldMetadataUpdates.length);
+        
+        // Save field metadata updates first
+        var chain = Promise.resolve();
+        if (fieldMetadataUpdates.length > 0) {
+            chain = saveFieldMetadataLabels(fieldMetadataUpdates, lcid);
+        }
+        
+        // Then save FormXML updates
+        return chain.then(function() {
+            if (formXmlUpdates.length === 0) {
+                console.log("No FormXML updates to save");
+                return updates.length; // Return total count
+            }
+            
+            return saveFormXMLLabels(formXmlUpdates, lcid);
+        });
+    }
+    
+    function saveFieldMetadataLabels(updates, lcid) {
+        console.log("saveFieldMetadataLabels - lcid:", lcid, "updates:", updates.length);
+        var base = Xrm.Utility.getGlobalContext().getClientUrl() + "/api/data/v9.2/";
+        var chain = Promise.resolve();
+        var saved = 0;
+        
+        // Group updates by field to avoid multiple API calls for the same field
+        var fieldUpdates = {};
+        for (var i = 0; i < updates.length; i++) {
+            var fieldName = updates[i].logicalName;
+            if (!fieldUpdates[fieldName]) {
+                fieldUpdates[fieldName] = updates[i];
+            }
+        }
+        
+        // Get MetadataId for each field and update
+        for (var fieldName in fieldUpdates) {
+            (function(item) {
+                chain = chain.then(function() {
+                    // First get the attribute metadata to find MetadataId
+                    var key = "EntityDefinitions(LogicalName='" + encodeURIComponent(state.entityLogicalName) + "')";
+                    var attrUrl = base + key + "/Attributes(LogicalName='" + item.logicalName + "')?$select=MetadataId";
+                    
+                    return fetchJson(attrUrl).then(function(attrResult) {
+                        if (!attrResult || !attrResult.MetadataId) {
+                            console.warn("Could not find MetadataId for field:", item.logicalName);
+                            return;
+                        }
+                        
+                        // Now update the field label
+                        var payload = {
+                            DisplayName: {
+                                LocalizedLabels: [{
+                                    "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
+                                    Label: item.newLabel || "",
+                                    LanguageCode: lcid
+                                }]
+                            }
+                        };
+                        
+                        var updateUrl = base + key + "/Attributes(" + attrResult.MetadataId + ")";
+                        return fetchJson(updateUrl, "PUT", payload).then(function() {
+                            saved++;
+                            console.log("Saved field metadata for:", item.logicalName);
+                        });
+                    }).catch(function(err) {
+                        console.error("Failed to update field metadata for", item.logicalName, ":", err);
+                        // Continue with other updates even if one fails
+                    });
+                });
+            })(fieldUpdates[fieldName]);
+        }
+        
+        return chain.then(function() {
+            console.log("Saved", saved, "field metadata label(s)");
+            return saved;
+        });
+    }
+    
+    function saveFormXMLLabels(updates, lcid) {
+        console.log("saveFormXMLLabels - lcid:", lcid, "updates:", updates.length);
+        
         var base = Xrm.Utility.getGlobalContext().getClientUrl() + "/api/data/v9.2/";
         var url = base + "systemforms(" + state.formId + ")?$select=formxml";
         
@@ -2080,7 +2181,7 @@
             }
             
             if (!modified) {
-                console.log("No form label changes to save");
+                console.log("No FormXML changes to save");
                 return 0;
             }
             
