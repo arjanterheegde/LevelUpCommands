@@ -766,134 +766,172 @@
         }
         
         var base = Xrm.Utility.getGlobalContext().getClientUrl() + "/api/data/v9.2/";
-        var url = base + "systemforms(" + state.formId + ")?$select=formxml";
         
-        return fetchJson(url).then(function (result) {
-            var items = [];
+        // First, fetch ALL field metadata for fallback when FormXML labels are missing
+        var metadataUrl = base + "EntityDefinitions(LogicalName='" + encodeURIComponent(state.entityLogicalName) + "')/Attributes?$select=LogicalName,DisplayName";
+        return fetchJson(metadataUrl).then(function(metadataResult) {
+            // Build a map of field metadata by logical name
+            var fieldMetadata = {};
+            if (metadataResult && metadataResult.value) {
+                for (var m = 0; m < metadataResult.value.length; m++) {
+                    var attr = metadataResult.value[m];
+                    if (attr.LogicalName) {
+                        fieldMetadata[attr.LogicalName.toLowerCase()] = attr.DisplayName;
+                    }
+                }
+            }
+            console.log("Loaded field metadata for", Object.keys(fieldMetadata).length, "attributes as fallback");
             
-            if (!result || !result.formxml) {
+            return fieldMetadata;
+        }).catch(function(err) {
+            console.warn("Failed to load field metadata, continuing without fallback:", err);
+            return {}; // Continue with empty metadata
+        }).then(function(fieldMetadata) {
+            // Now fetch the FormXML
+            var url = base + "systemforms(" + state.formId + ")?$select=formxml";
+            
+            return fetchJson(url).then(function (result) {
+                var items = [];
+                
+                if (!result || !result.formxml) {
+                    state.items = items;
+                    return;
+                }
+                
+                try {
+                    var parser = new DOMParser();
+                    var xmlDoc = parser.parseFromString(result.formxml, "text/xml");
+                    
+                    // Check for parse errors
+                    var parseError = xmlDoc.querySelector("parsererror");
+                    if (parseError) {
+                        throw new Error("XML parse error: " + parseError.textContent);
+                    }
+                    
+                    // Parse tabs - use labelid or id
+                    var tabs = xmlDoc.getElementsByTagName("tab");
+                    for (var i = 0; i < tabs.length; i++) {
+                        var tab = tabs[i];
+                        var labelObjectId = getXmlAttr(tab, ["labelid", "labelId", "id", "Id"]);
+                        if (!labelObjectId) labelObjectId = "tab_" + i;
+                        var elementId = getXmlAttr(tab, ["id", "Id"]) || labelObjectId;
+                        
+                        var userLabel = getLocalizedDescriptionFromContainer(tab, state.userLcid, false);
+                        var baseLabel = getLocalizedDescriptionFromContainer(tab, state.orgLcid, false);
+                        var targetLabel = getLocalizedDescriptionFromContainer(tab, state.targetLcid, false);
+                        
+                        items.push({
+                            id: elementId,
+                            labelObjectId: labelObjectId,
+                            logicalName: labelObjectId,
+                            type: "formlabel",
+                            baseLabel: baseLabel || "(Tab " + (i + 1) + ")",
+                            userLabel: userLabel || baseLabel || "(Tab " + (i + 1) + ")",
+                            targetLabel: targetLabel,
+                            userDescription: "",
+                            targetDescription: "",
+                            newLabel: targetLabel,
+                            newDescription: "",
+                            elementType: "tab"
+                        });
+                    }
+                    
+                    // Parse sections - use labelid or id
+                    var sections = xmlDoc.getElementsByTagName("section");
+                    for (var i = 0; i < sections.length; i++) {
+                        var section = sections[i];
+                        var labelObjectId = getXmlAttr(section, ["labelid", "labelId", "id", "Id", "name"]);
+                        if (!labelObjectId) labelObjectId = "section_" + i;
+                        var elementId = getXmlAttr(section, ["id", "Id", "name"]) || labelObjectId;
+                        
+                        var userLabel = getLocalizedDescriptionFromContainer(section, state.userLcid, false);
+                        var baseLabel = getLocalizedDescriptionFromContainer(section, state.orgLcid, false);
+                        var targetLabel = getLocalizedDescriptionFromContainer(section, state.targetLcid, false);
+                        
+                        items.push({
+                            id: elementId,
+                            labelObjectId: labelObjectId,
+                            logicalName: labelObjectId,
+                            type: "formlabel",
+                            baseLabel: baseLabel || "(Section " + (i + 1) + ")",
+                            userLabel: userLabel || baseLabel ||  "(Section " + (i + 1) + ")",
+                            targetLabel: targetLabel,
+                            userDescription: "",
+                            targetDescription: "",
+                            newLabel: targetLabel,
+                            newDescription: "",
+                            elementType: "section"
+                        });
+                    }
+                    
+                    // Parse CELL labels (field labels) with field metadata fallback
+                    var cells = xmlDoc.getElementsByTagName("cell");
+                    for (var i = 0; i < cells.length; i++) {
+                        var cell = cells[i];
+                        
+                        // Find the control with datafieldname inside this cell
+                        var control = getFieldControlFromCell(cell);
+                        if (!control) continue;
+                        
+                        var dataField = getXmlAttr(control, ["datafieldname", "dataFieldName"]);
+                        if (!dataField) continue;
+                        
+                        // Get the label object ID from the cell
+                        var labelObjectId = getXmlAttr(cell, ["labelid", "labelId", "id", "Id"]);
+                        if (!labelObjectId) continue;
+                        
+                        var elementId = getXmlAttr(cell, ["id", "Id"]) || labelObjectId;
+                        
+                        // Extract labels from the CELL
+                        var userLabel = getLocalizedDescriptionFromContainer(cell, state.userLcid, false);
+                        var baseLabel = getLocalizedDescriptionFromContainer(cell, state.orgLcid, false);
+                        var targetLabel = getLocalizedDescriptionFromContainer(cell, state.targetLcid, false);
+                        
+                        // FALLBACK: If labels are missing from FormXML, get them from field metadata
+                        var metadata = fieldMetadata[dataField.toLowerCase()];
+                        if (metadata) {
+                            if (!baseLabel || baseLabel.trim() === "") {
+                                baseLabel = labelText(metadata, state.orgLcid, "");
+                                if (baseLabel) console.log("Field metadata fallback for baseLabel:", dataField, "->", baseLabel);
+                            }
+                            if (!targetLabel || targetLabel.trim() === "") {
+                                targetLabel = labelText(metadata, state.targetLcid, "");
+                                if (targetLabel) console.log("Field metadata fallback for targetLabel:", dataField, "->", targetLabel);
+                            }
+                            if (!userLabel || userLabel.trim() === "") {
+                                userLabel = labelText(metadata, state.userLcid, dataField);
+                            }
+                        }
+                        
+                        items.push({
+                            id: elementId,
+                            labelObjectId: labelObjectId,
+                            logicalName: dataField,
+                            type: "formlabel",
+                            baseLabel: baseLabel || dataField,
+                            userLabel: userLabel || baseLabel || dataField,
+                            targetLabel: targetLabel,
+                            userDescription: "",
+                            targetDescription: "",
+                            newLabel: targetLabel,
+                            newDescription: "",
+                            elementType: "cell"
+                        });
+                    }
+                    
+                    items.sort(function (a, b) {
+                        return String(a.userLabel || "").localeCompare(String(b.userLabel || ""));
+                    });
+                    
+                    console.log("Loaded", items.length, "form labels with field metadata fallback");
+                    
+                } catch (e) {
+                    console.error("Failed to parse FormXML:", e);
+                    alert("Failed to parse form XML: " + e.message);
+                }
+                
                 state.items = items;
-                return;
-            }
-            
-            try {
-                var parser = new DOMParser();
-                var xmlDoc = parser.parseFromString(result.formxml, "text/xml");
-                
-                // Check for parse errors
-                var parseError = xmlDoc.querySelector("parsererror");
-                if (parseError) {
-                    throw new Error("XML parse error: " + parseError.textContent);
-                }
-                
-                // Parse tabs - use labelid or id
-                var tabs = xmlDoc.getElementsByTagName("tab");
-                for (var i = 0; i < tabs.length; i++) {
-                    var tab = tabs[i];
-                    var labelObjectId = getXmlAttr(tab, ["labelid", "labelId", "id", "Id"]);
-                    if (!labelObjectId) labelObjectId = "tab_" + i;
-                    var elementId = getXmlAttr(tab, ["id", "Id"]) || labelObjectId;
-                    
-                    var userLabel = getLocalizedDescriptionFromContainer(tab, state.userLcid, false);
-                    var baseLabel = getLocalizedDescriptionFromContainer(tab, state.orgLcid, true); // Always get org/base language
-                    var targetLabel = getLocalizedDescriptionFromContainer(tab, state.targetLcid, true);
-                    
-                    items.push({
-                        id: elementId,
-                        labelObjectId: labelObjectId,
-                        logicalName: labelObjectId,
-                        type: "formlabel",
-                        baseLabel: baseLabel || "(Tab " + (i + 1) + ")",
-                        userLabel: userLabel || baseLabel || "(Tab " + (i + 1) + ")",
-                        targetLabel: targetLabel,
-                        userDescription: "",
-                        targetDescription: "",
-                        newLabel: targetLabel,
-                        newDescription: "",
-                        elementType: "tab"
-                    });
-                }
-                
-                // Parse sections - use labelid or id
-                var sections = xmlDoc.getElementsByTagName("section");
-                for (var i = 0; i < sections.length; i++) {
-                    var section = sections[i];
-                    var labelObjectId = getXmlAttr(section, ["labelid", "labelId", "id", "Id", "name"]);
-                    if (!labelObjectId) labelObjectId = "section_" + i;
-                    var elementId = getXmlAttr(section, ["id", "Id", "name"]) || labelObjectId;
-                    
-                    var userLabel = getLocalizedDescriptionFromContainer(section, state.userLcid, false);
-                    var baseLabel = getLocalizedDescriptionFromContainer(section, state.orgLcid, true); // Always get org/base language
-                    var targetLabel = getLocalizedDescriptionFromContainer(section, state.targetLcid, true);
-                    
-                    items.push({
-                        id: elementId,
-                        labelObjectId: labelObjectId,
-                        logicalName: labelObjectId,
-                        type: "formlabel",
-                        baseLabel: baseLabel || "(Section " + (i + 1) + ")",
-                        userLabel: userLabel || baseLabel || "(Section " + (i + 1) + ")",
-                        targetLabel: targetLabel,
-                        userDescription: "",
-                        targetDescription: "",
-                        newLabel: targetLabel,
-                        newDescription: "",
-                        elementType: "section"
-                    });
-                }
-                
-                // Parse CELL labels (field labels) - This is the critical fix
-                // Field labels are stored on <cell> elements, not <control> elements
-                var cells = xmlDoc.getElementsByTagName("cell");
-                for (var i = 0; i < cells.length; i++) {
-                    var cell = cells[i];
-                    
-                    // Find the control with datafieldname inside this cell
-                    var control = getFieldControlFromCell(cell);
-                    if (!control) continue; // Skip cells without data-bound controls
-                    
-                    var dataField = getXmlAttr(control, ["datafieldname", "dataFieldName"]);
-                    if (!dataField) continue; // Skip controls without datafieldname
-                    
-                    // Get the label object ID from the cell (not the control!)
-                    var labelObjectId = getXmlAttr(cell, ["labelid", "labelId", "id", "Id"]);
-                    if (!labelObjectId) continue; // Skip cells without ID
-                    
-                    var elementId = getXmlAttr(cell, ["id", "Id"]) || labelObjectId;
-                    
-                    // Extract labels for both languages from the CELL
-                    var userLabel = getLocalizedDescriptionFromContainer(cell, state.userLcid, false);
-                    var baseLabel = getLocalizedDescriptionFromContainer(cell, state.orgLcid, true); // Always get org/base language
-                    var targetLabel = getLocalizedDescriptionFromContainer(cell, state.targetLcid, true);
-                    
-                    items.push({
-                        id: elementId,
-                        labelObjectId: labelObjectId,
-                        logicalName: dataField,
-                        type: "formlabel",
-                        baseLabel: baseLabel || dataField,
-                        userLabel: userLabel || baseLabel || dataField,
-                        targetLabel: targetLabel,
-                        userDescription: "",
-                        targetDescription: "",
-                        newLabel: targetLabel,
-                        newDescription: "",
-                        elementType: "cell"
-                    });
-                }
-                
-                items.sort(function (a, b) {
-                    return String(a.userLabel || "").localeCompare(String(b.userLabel || ""));
-                });
-                
-                console.log("Loaded", items.length, "form labels (cell-based)");
-                
-            } catch (e) {
-                console.error("Failed to parse FormXML:", e);
-                alert("Failed to parse form XML: " + e.message);
-            }
-            
-            state.items = items;
+            });
         });
     }
 
@@ -1250,7 +1288,7 @@
         
         // Show base language reference for form labels
         if (item.type === "formlabel" && item.baseLabel) {
-            html.push("<div class=\"trans-label\">Base Language (" + state.orgLcid + ") - Reference</div>");
+            html.push("<div class=\"trans-label\">Reference (" + state.orgLcid + ") - Base Language</div>");
             html.push("<div class=\"trans-text\">" + esc(item.baseLabel || "(empty)") + "</div>");
         }
         
