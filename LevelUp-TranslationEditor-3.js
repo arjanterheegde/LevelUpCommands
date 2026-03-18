@@ -149,17 +149,61 @@
         return result;
     }
 
-    function getLocalizedDescriptionFromContainer(container, lcid) {
+    function getLocalizedDescriptionFromContainer(container, lcid, useFallback) {
         var labelsEl = getDirectChildByTag(container, "labels");
         if (!labelsEl) return "";
         var labels = getDirectChildrenByTag(labelsEl, "label");
+        
+        // Try to find exact match first
+        var exactMatch = "";
+        var foundExactMatch = false;
         for (var i = 0; i < labels.length; i++) {
             var code = parseInt(getXmlAttr(labels[i], ["languagecode", "languageCode"]), 10);
             if (code === lcid) {
-                return getXmlAttr(labels[i], ["description"]) || "";
+                exactMatch = getXmlAttr(labels[i], ["description"]) || "";
+                foundExactMatch = true;
+                // If we have a non-empty match, return it immediately
+                if (exactMatch && exactMatch.trim() !== "") {
+                    return exactMatch;
+                }
+                // Otherwise continue to fallback if enabled
+                break;
             }
         }
-        return "";
+        
+        // If we found an exact match but it was empty, or no exact match found, and useFallback is true
+        if (useFallback && labels.length > 0) {
+            // Try organization language first (skip if it's the same as lcid)
+            if (state.orgLcid !== lcid) {
+                for (var i = 0; i < labels.length; i++) {
+                    var code = parseInt(getXmlAttr(labels[i], ["languagecode", "languageCode"]), 10);
+                    if (code === state.orgLcid) {
+                        var val = getXmlAttr(labels[i], ["description"]) || "";
+                        if (val && val.trim() !== "") return val;
+                    }
+                }
+            }
+            
+            // Try English (1033) as fallback (skip if it's the same as lcid or orgLcid)
+            if (1033 !== lcid && 1033 !== state.orgLcid) {
+                for (var i = 0; i < labels.length; i++) {
+                    var code = parseInt(getXmlAttr(labels[i], ["languagecode", "languageCode"]), 10);
+                    if (code === 1033) {
+                        var val = getXmlAttr(labels[i], ["description"]) || "";
+                        if (val && val.trim() !== "") return val;
+                    }
+                }
+            }
+            
+            // If still nothing, return first available non-empty label
+            for (var i = 0; i < labels.length; i++) {
+                var val = getXmlAttr(labels[i], ["description"]) || "";
+                if (val && val.trim() !== "") return val;
+            }
+        }
+        
+        // Return the exact match (even if empty) if we found one, otherwise empty string
+        return exactMatch;
     }
 
     function ensureLabelsElement(container, xmlDoc) {
@@ -750,15 +794,17 @@
                     if (!labelObjectId) labelObjectId = "tab_" + i;
                     var elementId = getXmlAttr(tab, ["id", "Id"]) || labelObjectId;
                     
-                    var userLabel = getLocalizedDescriptionFromContainer(tab, state.userLcid);
-                    var targetLabel = getLocalizedDescriptionFromContainer(tab, state.targetLcid);
+                    var userLabel = getLocalizedDescriptionFromContainer(tab, state.userLcid, false);
+                    var baseLabel = getLocalizedDescriptionFromContainer(tab, state.orgLcid, true); // Always get org/base language
+                    var targetLabel = getLocalizedDescriptionFromContainer(tab, state.targetLcid, true);
                     
                     items.push({
                         id: elementId,
                         labelObjectId: labelObjectId,
                         logicalName: labelObjectId,
                         type: "formlabel",
-                        userLabel: userLabel || "(Tab " + (i + 1) + ")",
+                        baseLabel: baseLabel || "(Tab " + (i + 1) + ")",
+                        userLabel: userLabel || baseLabel || "(Tab " + (i + 1) + ")",
                         targetLabel: targetLabel,
                         userDescription: "",
                         targetDescription: "",
@@ -776,15 +822,17 @@
                     if (!labelObjectId) labelObjectId = "section_" + i;
                     var elementId = getXmlAttr(section, ["id", "Id", "name"]) || labelObjectId;
                     
-                    var userLabel = getLocalizedDescriptionFromContainer(section, state.userLcid);
-                    var targetLabel = getLocalizedDescriptionFromContainer(section, state.targetLcid);
+                    var userLabel = getLocalizedDescriptionFromContainer(section, state.userLcid, false);
+                    var baseLabel = getLocalizedDescriptionFromContainer(section, state.orgLcid, true); // Always get org/base language
+                    var targetLabel = getLocalizedDescriptionFromContainer(section, state.targetLcid, true);
                     
                     items.push({
                         id: elementId,
                         labelObjectId: labelObjectId,
                         logicalName: labelObjectId,
                         type: "formlabel",
-                        userLabel: userLabel || "(Section " + (i + 1) + ")",
+                        baseLabel: baseLabel || "(Section " + (i + 1) + ")",
+                        userLabel: userLabel || baseLabel || "(Section " + (i + 1) + ")",
                         targetLabel: targetLabel,
                         userDescription: "",
                         targetDescription: "",
@@ -814,15 +862,17 @@
                     var elementId = getXmlAttr(cell, ["id", "Id"]) || labelObjectId;
                     
                     // Extract labels for both languages from the CELL
-                    var userLabel = getLocalizedDescriptionFromContainer(cell, state.userLcid);
-                    var targetLabel = getLocalizedDescriptionFromContainer(cell, state.targetLcid);
+                    var userLabel = getLocalizedDescriptionFromContainer(cell, state.userLcid, false);
+                    var baseLabel = getLocalizedDescriptionFromContainer(cell, state.orgLcid, true); // Always get org/base language
+                    var targetLabel = getLocalizedDescriptionFromContainer(cell, state.targetLcid, true);
                     
                     items.push({
                         id: elementId,
                         labelObjectId: labelObjectId,
                         logicalName: dataField,
                         type: "formlabel",
-                        userLabel: userLabel || dataField,
+                        baseLabel: baseLabel || dataField,
+                        userLabel: userLabel || baseLabel || dataField,
                         targetLabel: targetLabel,
                         userDescription: "",
                         targetDescription: "",
@@ -1197,6 +1247,13 @@
         html.push("</div>");
         
         html.push("<div class=\"trans-section\">");
+        
+        // Show base language reference for form labels
+        if (item.type === "formlabel" && item.baseLabel) {
+            html.push("<div class=\"trans-label\">Base Language (" + state.orgLcid + ") - Reference</div>");
+            html.push("<div class=\"trans-text\">" + esc(item.baseLabel || "(empty)") + "</div>");
+        }
+        
         html.push("<div class=\"trans-label\">Current (" + state.userLcid + ")</div>");
         html.push("<div class=\"trans-text\">" + esc(item.userLabel || "(empty)") + "</div>");
         
