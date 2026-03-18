@@ -1532,11 +1532,11 @@
                 if (saveBtn) saveBtn.disabled = true;
                 
                 // Show alert with instructions
-                var alertMsg = "Translations saved and published!\\n\\nNote: Dynamics 365 CE caches metadata heavily.\\n\\nTo see changes in CE:\\n1. Press Ctrl+F5 (hard refresh)\\n2. Or clear browser cache\\n3. Or close and reopen CE\\n\\nChanges are immediately visible in Power Apps (powerapps.com).";
+                var alertMsg = "Translations saved and published!\n\nNote: Dynamics 365 CE caches metadata heavily.\n\nTo see changes in CE:\n1. Press Ctrl+F5 (hard refresh)\n2. Or clear browser cache\n3. Or close and reopen CE\n\nChanges are immediately visible in Power Apps (powerapps.com).";
                 if (state.solutionTracking.enabled && state.solutionTracking.solutionName) {
-                    alertMsg += "\\n\\nSolution Tracking:\\n- Added " + solutionStats.added + " component(s)\\n- Skipped " + solutionStats.skipped + " (already present)";
+                    alertMsg += "\n\nSolution Tracking:\n- Added " + solutionStats.added + " component(s)\n- Skipped " + solutionStats.skipped + " (already present)";
                     if (solutionStats.failed > 0) {
-                        alertMsg += "\\n- Failed " + solutionStats.failed;
+                        alertMsg += "\n- Failed " + solutionStats.failed;
                     }
                 }
                 alert(alertMsg);
