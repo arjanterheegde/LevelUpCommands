@@ -647,13 +647,18 @@
             var chain = Promise.resolve();
             items.forEach(function(item) {
                 chain = chain.then(function() {
-                    return retrieveLocLabel("systemform", item.id, "name", state.targetLcid).then(function(nameLabel) {
-                        item.targetLabel = nameLabel;
-                        item.newLabel = nameLabel;
+                    // Get base language label
+                    return retrieveLocLabel("systemform", item.id, "name", state.orgLcid).then(function(baseLabel) {
+                        item.baseLabel = baseLabel;
                         
-                        return retrieveLocLabel("systemform", item.id, "description", state.targetLcid).then(function(descLabel) {
-                            item.targetDescription = descLabel;
-                            item.newDescription = descLabel;
+                        return retrieveLocLabel("systemform", item.id, "name", state.targetLcid).then(function(nameLabel) {
+                            item.targetLabel = nameLabel;
+                            item.newLabel = nameLabel;
+                            
+                            return retrieveLocLabel("systemform", item.id, "description", state.targetLcid).then(function(descLabel) {
+                                item.targetDescription = descLabel;
+                                item.newDescription = descLabel;
+                            });
                         });
                     });
                 });
@@ -695,6 +700,9 @@
             // Load translations for each view in parallel batches for efficiency
             var promises = [];
             items.forEach(function(item) {
+                var basePromise = retrieveLocLabel("savedquery", item.id, "name", state.orgLcid).then(function(baseLabel) {
+                    item.baseLabel = baseLabel;
+                });
                 var namePromise = retrieveLocLabel("savedquery", item.id, "name", state.targetLcid).then(function(nameLabel) {
                     item.targetLabel = nameLabel;
                     item.newLabel = nameLabel;
@@ -703,7 +711,7 @@
                     item.targetDescription = descLabel;
                     item.newDescription = descLabel;
                 });
-                promises.push(Promise.all([namePromise, descPromise]));
+                promises.push(Promise.all([basePromise, namePromise, descPromise]));
             });
             
             return Promise.all(promises).then(function() {
@@ -724,10 +732,15 @@
             var items = [];
             
             if (entity && entity.MetadataId) {
+                var baseLabel = labelText(entity.DisplayName, state.orgLcid, state.entityLogicalName);
                 var userLabel = labelText(entity.DisplayName, state.userLcid, state.entityLogicalName);
                 var targetLabel = labelText(entity.DisplayName, state.targetLcid, "");
+                
+                var basePluralLabel = labelText(entity.DisplayCollectionName, state.orgLcid, "");
                 var userPluralLabel = labelText(entity.DisplayCollectionName, state.userLcid, "");
                 var targetPluralLabel = labelText(entity.DisplayCollectionName, state.targetLcid, "");
+                
+                var baseDesc = labelText(entity.Description, state.orgLcid, "");
                 var userDesc = labelText(entity.Description, state.userLcid, "");
                 var targetDesc = labelText(entity.Description, state.targetLcid, "");
                 
@@ -735,6 +748,7 @@
                     id: entity.MetadataId,
                     logicalName: entity.LogicalName,
                     type: "entity-name",
+                    baseLabel: baseLabel,
                     userLabel: userLabel,
                     targetLabel: targetLabel,
                     userDescription: userDesc,
@@ -748,6 +762,7 @@
                     id: entity.MetadataId,
                     logicalName: entity.LogicalName,
                     type: "entity-plural",
+                    baseLabel: basePluralLabel,
                     userLabel: userPluralLabel,
                     targetLabel: targetPluralLabel,
                     userDescription: "",
@@ -761,6 +776,7 @@
                     id: entity.MetadataId,
                     logicalName: entity.LogicalName,
                     type: "entity-description",
+                    baseLabel: baseDesc,
                     userLabel: userDesc,
                     targetLabel: targetDesc,
                     userDescription: "",
@@ -1346,8 +1362,8 @@
         
         html.push("<div class=\"trans-section\">");
         
-        // Show base language reference for form labels and fields
-        if ((item.type === "formlabel" || item.type === "field") && item.baseLabel) {
+        // Show base language reference for all types (except when base = user language)
+        if (item.baseLabel && state.orgLcid !== state.userLcid) {
             html.push("<div class=\"trans-label\">Reference (" + state.orgLcid + ") - Base Language</div>");
             html.push("<div class=\"trans-text\">" + esc(item.baseLabel || "(empty)") + "</div>");
         }
