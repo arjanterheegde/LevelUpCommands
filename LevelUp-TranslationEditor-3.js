@@ -313,7 +313,7 @@
         return index;
     }
 
-    function fetchJson(url, method, body) {
+    function fetchJson(url, method, body, extraHeaders) {
         var opts = {
             method: method || "GET",
             headers: {
@@ -324,6 +324,13 @@
             },
             credentials: "same-origin"
         };
+        
+        // Add extra headers if provided (e.g., MSCRM.MergeLabels)
+        if (extraHeaders) {
+            for (var key in extraHeaders) {
+                opts.headers[key] = extraHeaders[key];
+            }
+        }
         
         if (body) {
             opts.body = JSON.stringify(body);
@@ -532,7 +539,8 @@
     function loadFieldTranslations() {
         var base = Xrm.Utility.getGlobalContext().getClientUrl() + "/api/data/v9.2/";
         var key = "EntityDefinitions(LogicalName=%27" + encodeURIComponent(state.entityLogicalName) + "%27)";
-        var url = base + key + "/Attributes?$select=LogicalName,DisplayName,Description,AttributeType,MetadataId";
+        // Simplified: only fetch what we need for HAR-route (no AttributeType/AttributeTypeName)
+        var url = base + key + "/Attributes?$select=LogicalName,DisplayName,Description,MetadataId";
         
         return fetchJson(url).then(function (result) {
             var items = [];
@@ -555,9 +563,7 @@
                         userDescription: userDesc,
                         targetDescription: targetDesc,
                         newLabel: targetLabel,
-                        newDescription: targetDesc,
-                        attributeType: attr.AttributeType || "Unknown",
-                        attributeTypeName: attr.AttributeTypeName ? attr.AttributeTypeName.Value : null
+                        newDescription: targetDesc
                     });
                 }
             }
@@ -1484,6 +1490,20 @@
     function saveTranslations() {
         if (state.loading) return;
         
+        // Validate target language is provisioned
+        var targetLang = null;
+        for (var i = 0; i < state.allLanguages.length; i++) {
+            if (state.allLanguages[i].lcid === state.targetLcid) {
+                targetLang = state.allLanguages[i];
+                break;
+            }
+        }
+        
+        if (!targetLang || !targetLang.provisioned) {
+            alert("Warning: The selected target language (" + state.targetLcid + ") is not provisioned/enabled in this environment.\n\nSaving translations for non-provisioned languages may not work correctly.\n\nPlease enable the language in Settings > Languages first.");
+            return;
+        }
+        
         // Validate solution tracking
         if (state.solutionTracking.enabled && !state.solutionTracking.solutionName) {
             alert("Please select a solution before saving.\n\nYou have enabled 'Track changes in solution' but haven't selected a solution yet.");
@@ -1745,6 +1765,36 @@
         });
     }
 
+    // Helper to merge localized labels without losing other languages
+    function mergeLocalizedLabels(existingLabels, lcid, newText) {
+        var result = [];
+        var normalized = String(newText == null ? "" : newText);
+        
+        // Preserve all existing labels except the one we're updating
+        if (existingLabels) {
+            for (var i = 0; i < existingLabels.length; i++) {
+                if (existingLabels[i].LanguageCode !== lcid) {
+                    result.push({
+                        "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
+                        "Label": existingLabels[i].Label,
+                        "LanguageCode": existingLabels[i].LanguageCode
+                    });
+                }
+            }
+        }
+        
+        // Add the new/updated label
+        if (normalized.trim() !== "") {
+            result.push({
+                "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
+                "Label": normalized,
+                "LanguageCode": lcid
+            });
+        }
+        
+        return result;
+    }
+
     function getAttributeMetadataType(item) {
         if (!item.attributeTypeName) return null;
         var typeName = String(item.attributeTypeName).toLowerCase();
@@ -1771,116 +1821,199 @@
 
     function saveFieldTranslations(updates, lcid) {
         var base = Xrm.Utility.getGlobalContext().getClientUrl() + "/api/data/v9.2/";
+        var entityPath = "EntityDefinitions(LogicalName='" + state.entityLogicalName + "')";
         var chain = Promise.resolve();
         var saved = 0;
         
-        console.log("saveFieldTranslations - lcid:", lcid, "updates:", updates.length);
+        console.log("saveFieldTranslations (Minimal PUT + UserLocalizedLabel) - lcid:", lcid, "updates:", updates.length);
         
         for (var i = 0; i < updates.length; i++) {
             (function (item) {
                 chain = chain.then(function () {
-                    var metadataType = getAttributeMetadataType(item);
-                    var payload = {
-                        DisplayName: {
-                            LocalizedLabels: []
-                        }
-                    };
+                    // Fetch current labels to merge
+                    var readUrl = base + entityPath + "/Attributes(" + item.id + ")?$select=DisplayName,Description,LogicalName,AttributeType";
                     
-                    if (metadataType) {
-                        payload["@odata.type"] = "Microsoft.Dynamics.CRM." + metadataType;
-                    }
+                    console.log("  Processing field:", item.logicalName, "MetadataId:", item.id);
+                    console.log("    newLabel:", item.newLabel);
+                    console.log("    targetLabel:", item.targetLabel);
                     
-                    if (item.newLabel && item.newLabel.trim() !== "") {
-                        payload.DisplayName.LocalizedLabels.push({
-                            "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
-                            Label: item.newLabel,
-                            LanguageCode: lcid
-                        });
-                    }
-                    
-                    if (item.newDescription !== item.targetDescription) {
-                        payload.Description = {
-                            LocalizedLabels: []
+                    return fetchJson(readUrl).then(function (currentAttr) {
+                        var payload = {
+                            "@odata.type": currentAttr["@odata.type"] || "Microsoft.Dynamics.CRM.StringAttributeMetadata",
+                            "LogicalName": currentAttr.LogicalName,
+                            "AttributeType": currentAttr.AttributeType
                         };
                         
-                        if (item.newDescription && item.newDescription.trim() !== "") {
-                            payload.Description.LocalizedLabels.push({
+                        var hasChanges = false;
+                        
+                        // Update DisplayName if changed
+                        if (item.newLabel !== item.targetLabel) {
+                            var existingLabels = currentAttr.DisplayName && currentAttr.DisplayName.LocalizedLabels;
+                            var mergedLabels = mergeLocalizedLabels(existingLabels, lcid, item.newLabel);
+                            
+                            payload.DisplayName = {
+                                "@odata.type": "Microsoft.Dynamics.CRM.Label",
+                                "LocalizedLabels": mergedLabels
+                            };
+                            
+                            // CRITICAL: Also set UserLocalizedLabel for the target language
+                            payload.DisplayName.UserLocalizedLabel = {
                                 "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
-                                Label: item.newDescription,
-                                LanguageCode: lcid
-                            });
+                                "Label": item.newLabel,
+                                "LanguageCode": lcid
+                            };
+                            
+                            hasChanges = true;
+                            console.log("    DisplayName updated with", mergedLabels.length, "labels");
                         }
-                    }
-                    
-                    var key = "EntityDefinitions(LogicalName=%27" + encodeURIComponent(state.entityLogicalName) + "%27)";
-                    var url = base + key + "/Attributes(" + item.id + ")";
-                    
-                    return fetchJson(url, "PUT", payload).then(function () {
-                        saved++;
+                        
+                        // Update Description if changed
+                        if (item.newDescription !== item.targetDescription) {
+                            var existingDescs = currentAttr.Description && currentAttr.Description.LocalizedLabels;
+                            var mergedDescs = mergeLocalizedLabels(existingDescs, lcid, item.newDescription);
+                            
+                            payload.Description = {
+                                "@odata.type": "Microsoft.Dynamics.CRM.Label",
+                                "LocalizedLabels": mergedDescs
+                            };
+                            
+                            // CRITICAL: Also set UserLocalizedLabel for the target language
+                            payload.Description.UserLocalizedLabel = {
+                                "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
+                                "Label": item.newDescription,
+                                "LanguageCode": lcid
+                            };
+                            
+                            hasChanges = true;
+                            console.log("    Description updated with", mergedDescs.length, "labels");
+                        }
+                        
+                        if (!hasChanges) {
+                            console.log("  No changes for field, skipping");
+                            return;
+                        }
+                        
+                        var putUrl = base + entityPath + "/Attributes(" + item.id + ")";
+                        console.log("    PUT URL:", putUrl);
+                        console.log("    Payload:", JSON.stringify(payload));
+                        
+                        // PUT with minimal metadata and MSCRM.MergeLabels header
+                        return fetchJson(putUrl, "PUT", payload, { "MSCRM.MergeLabels": "true" }).then(function () {
+                            saved++;
+                            console.log("  ✓ Saved field:", item.logicalName);
+                        }).catch(function(err) {
+                            console.error("  ✗ Failed to save field:", item.logicalName, err);
+                            throw err;
+                        });
                     });
                 });
             })(updates[i]);
         }
         
         return chain.then(function () {
-            console.log("Saved " + saved + " field translation(s)");
-            return saved;
+            console.log("Saved " + saved + " field translation(s), now publishing...");
+            
+            // Publish the entity to make changes visible
+            var publishPayload = {
+                ParameterXml: "<importexportxml><entities><entity>" + state.entityLogicalName + "</entity></entities></importexportxml>"
+            };
+            
+            return fetchJson(base + "PublishXml", "POST", publishPayload).then(function () {
+                console.log("Published " + state.entityLogicalName + " field translations successfully.");
+                return saved;
+            }).catch(function (publishErr) {
+                console.warn("Publish failed. Changes saved but may require manual publish:", publishErr);
+                return saved;
+            });
         });
     }
 
     function saveEntityTranslations(updates, lcid) {
         var base = Xrm.Utility.getGlobalContext().getClientUrl() + "/api/data/v9.2/";
+        var entityPath = "EntityDefinitions(LogicalName='" + state.entityLogicalName + "')";
         var chain = Promise.resolve();
         var saved = 0;
         
-        console.log("saveEntityTranslations - lcid:", lcid, "updates:", updates.length);
+        console.log("saveEntityTranslations (HAR-route) - lcid:", lcid, "updates:", updates.length);
         
         for (var i = 0; i < updates.length; i++) {
             (function (item) {
                 chain = chain.then(function () {
-                    var payload = {
-                        "@odata.type": "Microsoft.Dynamics.CRM.EntityMetadata"
-                    };
+                    // Fetch current entity labels
+                    var readUrl = base + entityPath + "?$select=DisplayName,DisplayCollectionName,Description";
                     
-                    if (item.propertyName === "DisplayName") {
-                        payload.DisplayName = {
-                            LocalizedLabels: [{
-                                "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
-                                Label: item.newLabel || "",
-                                LanguageCode: lcid
-                            }]
+                    return fetchJson(readUrl).then(function(currentEntity) {
+                        var payload = {
+                            "@odata.type": "Microsoft.Dynamics.CRM.EntityMetadata"
                         };
-                    } else if (item.propertyName === "DisplayCollectionName") {
-                        payload.DisplayCollectionName = {
-                            LocalizedLabels: [{
-                                "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
-                                Label: item.newLabel || "",
-                                LanguageCode: lcid
-                            }]
+                        
+                        if (item.propertyName === "DisplayName") {
+                            var existingLabels = currentEntity.DisplayName && currentEntity.DisplayName.LocalizedLabels;
+                            payload.DisplayName = {
+                                "@odata.type": "Microsoft.Dynamics.CRM.Label",
+                                "LocalizedLabels": mergeLocalizedLabels(existingLabels, lcid, item.newLabel)
+                            };
+                        } else if (item.propertyName === "DisplayCollectionName") {
+                            var existingLabels = currentEntity.DisplayCollectionName && currentEntity.DisplayCollectionName.LocalizedLabels;
+                            payload.DisplayCollectionName = {
+                                "@odata.type": "Microsoft.Dynamics.CRM.Label",
+                                "LocalizedLabels": mergeLocalizedLabels(existingLabels, lcid, item.newLabel)
+                            };
+                        } else if (item.propertyName === "Description") {
+                            var existingLabels = currentEntity.Description && currentEntity.Description.LocalizedLabels;
+                            payload.Description = {
+                                "@odata.type": "Microsoft.Dynamics.CRM.Label",
+                                "LocalizedLabels": mergeLocalizedLabels(existingLabels, lcid, item.newLabel)
+                            };
+                        }
+                        
+                        // Use UpdateEntity via Organization Request for better reliability
+                        var requestPayload = {
+                            Entity: payload,
+                            MergeLabels: true
                         };
-                    } else if (item.propertyName === "Description") {
-                        payload.Description = {
-                            LocalizedLabels: [{
-                                "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
-                                Label: item.newLabel || "",
-                                LanguageCode: lcid
-                            }]
-                        };
-                    }
-                    
-                    var key = "EntityDefinitions(LogicalName=%27" + encodeURIComponent(state.entityLogicalName) + "%27)";
-                    var url = base + key;
-                    
-                    return fetchJson(url, "PUT", payload).then(function () {
-                        saved++;
+                        requestPayload.Entity.MetadataId = item.id;
+                        requestPayload.Entity.LogicalName = state.entityLogicalName;
+                        
+                        var updateUrl = base + "UpdateEntity";
+                        return fetchJson(updateUrl, "POST", requestPayload).then(function () {
+                            saved++;
+                            console.log("  Saved entity property:", item.propertyName);
+                        }).catch(function(err) {
+                            console.error("  Failed to save entity property:", item.propertyName, err);
+                            // Fallback to direct PUT if UpdateEntity fails
+                            return fetchJson(base + entityPath, "PUT", payload, { "MSCRM.MergeLabels": "true" }).then(function () {
+                                saved++;
+                                console.log("  Saved entity property (fallback PUT):", item.propertyName);
+                            });
+                        });
                     });
                 });
             })(updates[i]);
         }
         
         return chain.then(function () {
-            console.log("Saved " + saved + " entity translation(s)");
-            return saved;
+            console.log("Saved " + saved + " entity translation(s), now publishing...");
+            
+            // Publish the entity to make changes visible
+            var publishPayload = {
+                ParameterXml: "<importexportxml><entities><entity>" + state.entityLogicalName + "</entity></entities></importexportxml>"
+            };
+            
+            return fetchJson(base + "PublishXml", "POST", publishPayload).then(function () {
+                console.log("Published " + state.entityLogicalName + " entity translations successfully.");
+                return saved;
+            }).catch(function (publishErr) {
+                console.warn("Publish failed. Changes saved but may require manual publish:", publishErr);
+                // Try PublishAllXml as fallback
+                return fetchJson(base + "PublishAllXml", "POST", {}).then(function() {
+                    console.log("PublishAllXml succeeded");
+                    return saved;
+                }).catch(function(err2) {
+                    console.warn("PublishAllXml also failed:", err2);
+                    return saved;
+                });
+            });
         });
     }
 
@@ -2075,8 +2208,9 @@
     }
     
     function saveFieldMetadataLabels(updates, lcid) {
-        console.log("saveFieldMetadataLabels - lcid:", lcid, "updates:", updates.length);
+        console.log("saveFieldMetadataLabels (HAR-route) - lcid:", lcid, "updates:", updates.length);
         var base = Xrm.Utility.getGlobalContext().getClientUrl() + "/api/data/v9.2/";
+        var entityPath = "EntityDefinitions(LogicalName='" + state.entityLogicalName + "')";
         var chain = Promise.resolve();
         var saved = 0;
         
@@ -2089,33 +2223,33 @@
             }
         }
         
-        // Get MetadataId for each field and update
+        // Update each field using HAR-route
         for (var fieldName in fieldUpdates) {
             (function(item) {
                 chain = chain.then(function() {
-                    // First get the attribute metadata to find MetadataId
-                    var key = "EntityDefinitions(LogicalName='" + encodeURIComponent(state.entityLogicalName) + "')";
-                    var attrUrl = base + key + "/Attributes(LogicalName='" + item.logicalName + "')?$select=MetadataId";
+                    // First, get MetadataId by LogicalName
+                    var lookupUrl = base + entityPath + "/Attributes(LogicalName='" + item.logicalName + "')?$select=MetadataId,DisplayName,Description";
                     
-                    return fetchJson(attrUrl).then(function(attrResult) {
-                        if (!attrResult || !attrResult.MetadataId) {
-                            console.warn("Could not find MetadataId for field:", item.logicalName);
+                    return fetchJson(lookupUrl).then(function(currentAttr) {
+                        if (!currentAttr || !currentAttr.MetadataId) {
+                            console.warn("Could not find attribute:", item.logicalName);
                             return;
                         }
                         
-                        // Now update the field label
-                        var payload = {
-                            DisplayName: {
-                                LocalizedLabels: [{
-                                    "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
-                                    Label: item.newLabel || "",
-                                    LanguageCode: lcid
-                                }]
-                            }
+                        var payload = {};
+                        
+                        // Merge DisplayName labels
+                        var existingLabels = currentAttr.DisplayName && currentAttr.DisplayName.LocalizedLabels;
+                        payload.DisplayName = {
+                            "@odata.type": "Microsoft.Dynamics.CRM.Label",
+                            "LocalizedLabels": mergeLocalizedLabels(existingLabels, lcid, item.newLabel)
                         };
                         
-                        var updateUrl = base + key + "/Attributes(" + attrResult.MetadataId + ")";
-                        return fetchJson(updateUrl, "PUT", payload).then(function() {
+                        console.log("  Field metadata DisplayName merged", payload.DisplayName.LocalizedLabels.length, "labels for:", item.logicalName);
+                        
+                        var putUrl = base + entityPath + "/Attributes(" + currentAttr.MetadataId + ")";
+                        // MSCRM.MergeLabels: true to preserve other language labels
+                        return fetchJson(putUrl, "PUT", payload, { "MSCRM.MergeLabels": "true" }).then(function() {
                             saved++;
                             console.log("Saved field metadata for:", item.logicalName);
                         });
@@ -2128,8 +2262,27 @@
         }
         
         return chain.then(function() {
-            console.log("Saved", saved, "field metadata label(s)");
-            return saved;
+            console.log("Saved", saved, "field metadata label(s), now publishing...");
+            
+            // Publish the entity to make changes visible
+            var publishPayload = {
+                ParameterXml: "<importexportxml><entities><entity>" + state.entityLogicalName + "</entity></entities></importexportxml>"
+            };
+            
+            return fetchJson(base + "PublishXml", "POST", publishPayload).then(function () {
+                console.log("Published field metadata label changes successfully.");
+                return saved;
+            }).catch(function (publishErr) {
+                console.warn("Publish failed. Changes saved but may require manual publish:", publishErr);
+                // Try PublishAllXml as fallback
+                return fetchJson(base + "PublishAllXml", "POST", {}).then(function() {
+                    console.log("PublishAllXml succeeded");
+                    return saved;
+                }).catch(function(err2) {
+                    console.warn("PublishAllXml also failed:", err2);
+                    return saved;
+                });
+            });
         });
     }
     
