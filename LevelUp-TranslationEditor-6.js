@@ -326,6 +326,12 @@
             credentials: "same-origin"
         };
         
+        // Add cache-busting headers for GET requests (especially after saves)
+        if (!method || method === "GET") {
+            opts.headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+            opts.headers["Pragma"] = "no-cache";
+        }
+        
         // Add extra headers if provided (e.g., MSCRM.MergeLabels)
         if (extraHeaders) {
             for (var key in extraHeaders) {
@@ -726,7 +732,12 @@
     function loadEntityTranslations() {
         var base = Xrm.Utility.getGlobalContext().getClientUrl() + "/api/data/v9.2/";
         var key = "EntityDefinitions(LogicalName=%27" + encodeURIComponent(state.entityLogicalName) + "%27)";
-        var url = base + key + "?$select=LogicalName,DisplayName,DisplayCollectionName,Description,MetadataId";
+        
+        // Force cache refresh with timestamp + random component
+        var cacheBuster = "&_t=" + new Date().getTime() + "&_r=" + Math.random().toString(36).substr(2, 9);
+        var url = base + key + "?$select=LogicalName,DisplayName,DisplayCollectionName,Description,MetadataId" + cacheBuster;
+        
+        console.log("Loading entity translations with cache buster:", cacheBuster);
         
         return fetchJson(url).then(function (entity) {
             var items = [];
@@ -744,6 +755,8 @@
                 var userDesc = labelText(entity.Description, state.userLcid, "");
                 var targetDesc = labelText(entity.Description, state.targetLcid, "");
                 
+                console.log("Entity Description Labels - Base:", baseDesc, "User:", userDesc, "Target:", targetDesc);
+                
                 items.push({
                     id: entity.MetadataId,
                     logicalName: entity.LogicalName,
@@ -751,10 +764,10 @@
                     baseLabel: baseLabel,
                     userLabel: userLabel,
                     targetLabel: targetLabel,
-                    userDescription: userDesc,
-                    targetDescription: targetDesc,
+                    userDescription: "",
+                    targetDescription: "",
                     newLabel: targetLabel,
-                    newDescription: targetDesc,
+                    newDescription: "",
                     propertyName: "DisplayName"
                 });
                 
@@ -1362,19 +1375,36 @@
         
         html.push("<div class=\"trans-section\">");
         
-        // Show base language reference for all types (except when base = user language)
-        if (item.baseLabel && state.orgLcid !== state.userLcid) {
-            html.push("<div class=\"trans-label\">Reference (" + state.orgLcid + ") - Base Language</div>");
-            html.push("<div class=\"trans-text\">" + esc(item.baseLabel || "(empty)") + "</div>");
+        // Special handling for entity-description (it's a description, not a label)
+        if (item.type === "entity-description") {
+            // Show base language reference
+            if (item.baseLabel && state.orgLcid !== state.userLcid) {
+                html.push("<div class=\"trans-label\">Reference (" + state.orgLcid + ") - Base Language</div>");
+                html.push("<div class=\"trans-text\">" + esc(item.baseLabel || "(empty)") + "</div>");
+            }
+            
+            html.push("<div class=\"trans-label\">Current (" + state.userLcid + ")</div>");
+            html.push("<div class=\"trans-text\">" + esc(item.userLabel || "(empty)") + "</div>");
+            
+            html.push("<div class=\"trans-label\">Translation (" + state.targetLcid + ")</div>");
+            html.push("<textarea class=\"ta\" data-id=\"" + esc(item.rowKey || item.id) + "\" data-field=\"label\" placeholder=\"Enter description translation...\">" + esc(item.newLabel || "") + "</textarea>");
+            html.push("</div>");
+        } else {
+            // Normal label handling for other types
+            // Show base language reference for all types (except when base = user language)
+            if (item.baseLabel && state.orgLcid !== state.userLcid) {
+                html.push("<div class=\"trans-label\">Reference (" + state.orgLcid + ") - Base Language</div>");
+                html.push("<div class=\"trans-text\">" + esc(item.baseLabel || "(empty)") + "</div>");
+            }
+            
+            html.push("<div class=\"trans-label\">Current (" + state.userLcid + ")</div>");
+            html.push("<div class=\"trans-text\">" + esc(item.userLabel || "(empty)") + "</div>");
+            
+            html.push("<div class=\"trans-label\">Translation (" + state.targetLcid + ")</div>");
+            var disabledAttr = (item.type === "field" && item.canModify === false) ? " disabled title=\"Cannot modify: IsCustomizable or IsRenameable is false\"" : "";
+            html.push("<input class=\"input\" type=\"text\" data-id=\"" + esc(item.rowKey || item.id) + "\" data-field=\"label\" value=\"" + esc(item.newLabel || "") + "\" placeholder=\"Enter translation...\"" + disabledAttr + ">");
+            html.push("</div>");
         }
-        
-        html.push("<div class=\"trans-label\">Current (" + state.userLcid + ")</div>");
-        html.push("<div class=\"trans-text\">" + esc(item.userLabel || "(empty)") + "</div>");
-        
-        html.push("<div class=\"trans-label\">Translation (" + state.targetLcid + ")</div>");
-        var disabledAttr = (item.type === "field" && item.canModify === false) ? " disabled title=\"Cannot modify: IsCustomizable or IsRenameable is false\"" : "";
-        html.push("<input class=\"input\" type=\"text\" data-id=\"" + esc(item.rowKey || item.id) + "\" data-field=\"label\" value=\"" + esc(item.newLabel || "") + "\" placeholder=\"Enter translation...\"" + disabledAttr + ">");
-        html.push("</div>");
         
         // Always show description for views, forms, and items that have descriptions
         if (item.type === "view" || item.type === "form" || item.userDescription || item.targetDescription) {
@@ -1718,7 +1748,14 @@
             
             setStatus(statusMsg);
             
-            return loadTranslations().then(function () {
+            // Add small delay to allow metadata cache to refresh (especially for entity translations)
+            var delayMs = (state.scope === "entity" || state.scope === "fields") ? 1500 : 500;
+            
+            return new Promise(function(resolve) {
+                setTimeout(resolve, delayMs);
+            }).then(function() {
+                return loadTranslations();
+            }).then(function () {
                 renderItems();
                 state.hasChanges = false;
                 
@@ -2161,8 +2198,27 @@
         }
         
         return chain.then(function () {
-            console.log("Saved " + saved + " form translation(s)");
-            return saved;
+            console.log("Saved " + saved + " form translation(s), now publishing...");
+            
+            // Publish the entity to make form translations visible
+            var publishPayload = {
+                ParameterXml: "<importexportxml><entities><entity>" + state.entityLogicalName + "</entity></entities></importexportxml>"
+            };
+            
+            return fetchJson(base + "PublishXml", "POST", publishPayload).then(function () {
+                console.log("Published " + state.entityLogicalName + " form translations successfully.");
+                return saved;
+            }).catch(function (publishErr) {
+                console.warn("Publish failed. Changes saved but may require manual publish:", publishErr);
+                // Try PublishAllXml as fallback
+                return fetchJson(base + "PublishAllXml", "POST", {}).then(function() {
+                    console.log("PublishAllXml succeeded");
+                    return saved;
+                }).catch(function(err2) {
+                    console.warn("PublishAllXml also failed:", err2);
+                    return saved;
+                });
+            });
         });
     }
 
