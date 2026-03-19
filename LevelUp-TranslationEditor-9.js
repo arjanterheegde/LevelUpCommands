@@ -662,13 +662,22 @@
                         return retrieveLocLabel("systemform", item.id, "description", state.orgLcid).then(function(baseDesc) {
                             item.baseDescription = baseDesc;
                             
-                            return retrieveLocLabel("systemform", item.id, "name", state.targetLcid).then(function(nameLabel) {
-                                item.targetLabel = nameLabel;
-                                item.newLabel = nameLabel;
+                            // Get user language values via RetrieveLocLabel (not API fallback)
+                            return retrieveLocLabel("systemform", item.id, "name", state.userLcid).then(function(userLabelActual) {
+                                item.userLabel = userLabelActual || item.userLabel; // Keep API fallback if no translation
                                 
-                                return retrieveLocLabel("systemform", item.id, "description", state.targetLcid).then(function(descLabel) {
-                                    item.targetDescription = descLabel;
-                                    item.newDescription = descLabel;
+                                return retrieveLocLabel("systemform", item.id, "description", state.userLcid).then(function(userDescActual) {
+                                    item.userDescription = userDescActual; // Empty string if no translation exists
+                                    
+                                    return retrieveLocLabel("systemform", item.id, "name", state.targetLcid).then(function(nameLabel) {
+                                        item.targetLabel = nameLabel;
+                                        item.newLabel = nameLabel;
+                                        
+                                        return retrieveLocLabel("systemform", item.id, "description", state.targetLcid).then(function(descLabel) {
+                                            item.targetDescription = descLabel;
+                                            item.newDescription = descLabel;
+                                        });
+                                    });
                                 });
                             });
                         });
@@ -718,6 +727,13 @@
                 var baseDescPromise = retrieveLocLabel("savedquery", item.id, "description", state.orgLcid).then(function(baseDesc) {
                     item.baseDescription = baseDesc;
                 });
+                // Get user language values via RetrieveLocLabel (not API fallback)
+                var userNamePromise = retrieveLocLabel("savedquery", item.id, "name", state.userLcid).then(function(userLabelActual) {
+                    item.userLabel = userLabelActual || item.userLabel; // Keep API fallback if no translation
+                });
+                var userDescPromise = retrieveLocLabel("savedquery", item.id, "description", state.userLcid).then(function(userDescActual) {
+                    item.userDescription = userDescActual; // Empty string if no translation exists
+                });
                 var namePromise = retrieveLocLabel("savedquery", item.id, "name", state.targetLcid).then(function(nameLabel) {
                     item.targetLabel = nameLabel;
                     item.newLabel = nameLabel;
@@ -726,7 +742,7 @@
                     item.targetDescription = descLabel;
                     item.newDescription = descLabel;
                 });
-                promises.push(Promise.all([basePromise, baseDescPromise, namePromise, descPromise]));
+                promises.push(Promise.all([basePromise, baseDescPromise, userNamePromise, userDescPromise, namePromise, descPromise]));
             });
             
             return Promise.all(promises).then(function() {
@@ -1447,11 +1463,21 @@
             
             html.push("<div class=\"trans-label\">Description Translation (" + state.targetLcid + ")</div>");
             var descDisabledAttr = (item.type === "field" && item.canModify === false) ? " disabled title=\"Cannot modify: IsCustomizable or IsRenameable is false\"" : "";
-            // Disable description field if base language description is not set
-            if ((item.type === "view" || item.type === "form") && (!item.baseDescription || item.baseDescription === "")) {
+            // Disable description field if base language description is not set AND we're not editing the base language
+            if ((item.type === "view" || item.type === "form") && state.targetLcid !== state.orgLcid && (!item.baseDescription || item.baseDescription === "")) {
                 descDisabledAttr += " disabled title=\"Cannot add translation: Base language (" + state.orgLcid + ") description must be set first\"";
             }
             html.push("<textarea class=\"ta\" data-id=\"" + esc(item.rowKey || item.id) + "\" data-field=\"description\" placeholder=\"Enter description translation...\"" + descDisabledAttr + ">" + esc(item.newDescription || "") + "</textarea>");
+            
+            // Add placeholder for dynamic warning (for base language descriptions)
+            if ((item.type === "view" || item.type === "form") && state.targetLcid === state.orgLcid && item.baseDescription) {
+                var showWarning = (!item.newDescription || item.newDescription.trim() === "");
+                html.push("<div id=\"desc_warning_" + esc(item.rowKey || item.id) + "\" style=\"" + (showWarning ? "" : "display:none;") + "margin-top:6px;padding:8px;background:#fff4e5;border-left:3px solid #f59e0b;color:#92400e;font-size:12px;line-height:1.4;\">");
+                html.push("<strong>⚠️ Note:</strong> Base language descriptions cannot be completely removed due to Dynamics 365 localization constraints. ");
+                html.push("Clearing this field will skip the save operation and the previous value will remain.");
+                html.push("</div>");
+            }
+            
             html.push("</div>");
         }
         
@@ -1514,6 +1540,21 @@
                     state.items[i].newLabel = value;
                 } else if (field === "description") {
                     state.items[i].newDescription = value;
+                    
+                    // Update warning visibility for base language descriptions
+                    if ((state.items[i].type === "view" || state.items[i].type === "form") && 
+                        state.targetLcid === state.orgLcid && 
+                        state.items[i].baseDescription) {
+                        var warningEl = document.getElementById("desc_warning_" + rowKey);
+                        if (warningEl) {
+                            // Show warning if description is empty, hide if it has content
+                            if (!value || value.trim() === "") {
+                                warningEl.style.display = "";
+                            } else {
+                                warningEl.style.display = "none";
+                            }
+                        }
+                    }
                 }
                 
                 // Save pending changes
@@ -2182,6 +2223,10 @@
         var saved = 0;
         
         console.log("saveFormTranslations - lcid:", lcid, "updates:", updates.length);
+        console.log("Base language (orgLcid):", state.orgLcid);
+        
+        // Check if we're editing the base language
+        var isBaseLanguage = (lcid === state.orgLcid);
         
         for (var i = 0; i < updates.length; i++) {
             (function (item) {
@@ -2189,46 +2234,104 @@
                     var id = String(item.id).replace(/[{}]/g, "").toLowerCase();
                     var promises = [];
                     
-                    // Update name using SetLocLabels for proper localization
-                    if (item.newLabel !== item.targetLabel) {
-                        var namePayload = {
-                            EntityMoniker: {
-                                "@odata.id": base + "systemforms(" + id + ")"
-                            },
-                            AttributeName: "name",
-                            Labels: [
-                                {
-                                    "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
-                                    Label: item.newLabel || "",
-                                    LanguageCode: lcid
-                                }
-                            ]
-                        };
-                        console.log("  SetLocLabels form name payload:", JSON.stringify(namePayload));
-                        promises.push(fetchJson(base + "SetLocLabels", "POST", namePayload));
-                    }
-                    
-                    // Update description using SetLocLabels
-                    // Skip if base language description is not set (SetLocLabels requires base language to exist)
-                    if (item.newDescription !== item.targetDescription) {
-                        if (!item.baseDescription || item.baseDescription === "") {
-                            console.warn("  Skipping description save for form (base language description not set):", item.userLabel);
-                        } else {
-                            var descPayload = {
+                    if (isBaseLanguage) {
+                        // For base language, we need different logic:
+                        // - To SET a value: use SetLocLabels with base language LCID
+                        // - To CLEAR a value: use PATCH with null
+                        console.log("  Base language update on form:", id);
+                        
+                        // Handle name
+                        if (item.newLabel !== item.targetLabel) {
+                            if (item.newLabel && item.newLabel.trim() !== "") {
+                                // Setting a value: use SetLocLabels
+                                var namePayload = {
+                                    EntityMoniker: {
+                                        "@odata.id": base + "systemforms(" + id + ")"
+                                    },
+                                    AttributeName: "name",
+                                    Labels: [
+                                        {
+                                            "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
+                                            Label: item.newLabel,
+                                            LanguageCode: lcid
+                                        }
+                                    ]
+                                };
+                                console.log("  SetLocLabels name (base) payload:", JSON.stringify(namePayload));
+                                promises.push(fetchJson(base + "SetLocLabels", "POST", namePayload));
+                            } else {
+                                // Clearing base language name: skip (cannot be removed via API)
+                                console.warn("  Skipping base language name clear - not supported by D365 localization API");
+                            }
+                        }
+                        
+                        // Handle description
+                        if (item.newDescription !== item.targetDescription) {
+                            if (item.newDescription && item.newDescription.trim() !== "") {
+                                // Setting a value: use SetLocLabels
+                                var descPayload = {
+                                    EntityMoniker: {
+                                        "@odata.id": base + "systemforms(" + id + ")"
+                                    },
+                                    AttributeName: "description",
+                                    Labels: [
+                                        {
+                                            "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
+                                            Label: item.newDescription,
+                                            LanguageCode: lcid
+                                        }
+                                    ]
+                                };
+                                console.log("  SetLocLabels description (base) payload:", JSON.stringify(descPayload));
+                                promises.push(fetchJson(base + "SetLocLabels", "POST", descPayload));
+                            } else {
+                                // Clearing base language description: skip (cannot be removed via API)
+                                console.warn("  Skipping base language description clear - not supported by D365 localization API");
+                            }
+                        }
+                    } else {
+                        // For non-base languages, use SetLocLabels
+                        // Update name using SetLocLabels for proper localization
+                        if (item.newLabel !== item.targetLabel) {
+                            var namePayload = {
                                 EntityMoniker: {
                                     "@odata.id": base + "systemforms(" + id + ")"
                                 },
-                                AttributeName: "description",
+                                AttributeName: "name",
                                 Labels: [
                                     {
                                         "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
-                                        Label: item.newDescription || "",
+                                        Label: item.newLabel || "",
                                         LanguageCode: lcid
                                     }
                                 ]
                             };
-                            console.log("  SetLocLabels form description payload:", JSON.stringify(descPayload));
-                            promises.push(fetchJson(base + "SetLocLabels", "POST", descPayload));
+                            console.log("  SetLocLabels form name payload:", JSON.stringify(namePayload));
+                            promises.push(fetchJson(base + "SetLocLabels", "POST", namePayload));
+                        }
+                        
+                        // Update description using SetLocLabels
+                        // Skip if base language description is not set (SetLocLabels requires base language to exist)
+                        if (item.newDescription !== item.targetDescription) {
+                            if (!item.baseDescription || item.baseDescription === "") {
+                                console.warn("  Skipping description save for form (base language description not set):", item.userLabel);
+                            } else {
+                                var descPayload = {
+                                    EntityMoniker: {
+                                        "@odata.id": base + "systemforms(" + id + ")"
+                                    },
+                                    AttributeName: "description",
+                                    Labels: [
+                                        {
+                                            "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
+                                            Label: item.newDescription || "",
+                                            LanguageCode: lcid
+                                        }
+                                    ]
+                                };
+                                console.log("  SetLocLabels form description payload:", JSON.stringify(descPayload));
+                                promises.push(fetchJson(base + "SetLocLabels", "POST", descPayload));
+                            }
                         }
                     }
                     
@@ -2270,6 +2373,10 @@
         var saved = 0;
         
         console.log("saveViewTranslations - lcid:", lcid, "updates:", updates.length);
+        console.log("Base language (orgLcid):", state.orgLcid);
+        
+        // Check if we're editing the base language
+        var isBaseLanguage = (lcid === state.orgLcid);
         
         for (var i = 0; i < updates.length; i++) {
             (function (item) {
@@ -2277,46 +2384,104 @@
                     var id = String(item.id).replace(/[{}]/g, "").toLowerCase();
                     var promises = [];
                     
-                    // Update name using SetLocLabels for proper localization
-                    if (item.newLabel !== item.targetLabel) {
-                        var namePayload = {
-                            EntityMoniker: {
-                                "@odata.id": base + "savedqueries(" + id + ")"
-                            },
-                            AttributeName: "name",
-                            Labels: [
-                                {
-                                    "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
-                                    Label: item.newLabel || "",
-                                    LanguageCode: lcid
-                                }
-                            ]
-                        };
-                        console.log("  SetLocLabels name payload:", JSON.stringify(namePayload));
-                        promises.push(fetchJson(base + "SetLocLabels", "POST", namePayload));
-                    }
-                    
-                    // Update description using SetLocLabels
-                    // Skip if base language description is not set (SetLocLabels requires base language to exist)
-                    if (item.newDescription !== item.targetDescription) {
-                        if (!item.baseDescription || item.baseDescription === "") {
-                            console.warn("  Skipping description save for view (base language description not set):", item.userLabel);
-                        } else {
-                            var descPayload = {
+                    if (isBaseLanguage) {
+                        // For base language, we need different logic:
+                        // - To SET a value: use SetLocLabels with base language LCID
+                        // - To CLEAR a value: use PATCH with null
+                        console.log("  Base language update on view:", id);
+                        
+                        // Handle name
+                        if (item.newLabel !== item.targetLabel) {
+                            if (item.newLabel && item.newLabel.trim() !== "") {
+                                // Setting a value: use SetLocLabels
+                                var namePayload = {
+                                    EntityMoniker: {
+                                        "@odata.id": base + "savedqueries(" + id + ")"
+                                    },
+                                    AttributeName: "name",
+                                    Labels: [
+                                        {
+                                            "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
+                                            Label: item.newLabel,
+                                            LanguageCode: lcid
+                                        }
+                                    ]
+                                };
+                                console.log("  SetLocLabels name (base) payload:", JSON.stringify(namePayload));
+                                promises.push(fetchJson(base + "SetLocLabels", "POST", namePayload));
+                            } else {
+                                // Clearing base language name: skip (cannot be removed via API)
+                                console.warn("  Skipping base language name clear - not supported by D365 localization API");
+                            }
+                        }
+                        
+                        // Handle description
+                        if (item.newDescription !== item.targetDescription) {
+                            if (item.newDescription && item.newDescription.trim() !== "") {
+                                // Setting a value: use SetLocLabels
+                                var descPayload = {
+                                    EntityMoniker: {
+                                        "@odata.id": base + "savedqueries(" + id + ")"
+                                    },
+                                    AttributeName: "description",
+                                    Labels: [
+                                        {
+                                            "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
+                                            Label: item.newDescription,
+                                            LanguageCode: lcid
+                                        }
+                                    ]
+                                };
+                                console.log("  SetLocLabels description (base) payload:", JSON.stringify(descPayload));
+                                promises.push(fetchJson(base + "SetLocLabels", "POST", descPayload));
+                            } else {
+                                // Clearing base language description: skip (cannot be removed via API)
+                                console.warn("  Skipping base language description clear - not supported by D365 localization API");
+                            }
+                        }
+                    } else {
+                        // For non-base languages, use SetLocLabels
+                        // Update name using SetLocLabels for proper localization
+                        if (item.newLabel !== item.targetLabel) {
+                            var namePayload = {
                                 EntityMoniker: {
                                     "@odata.id": base + "savedqueries(" + id + ")"
                                 },
-                                AttributeName: "description",
+                                AttributeName: "name",
                                 Labels: [
                                     {
                                         "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
-                                        Label: item.newDescription || "",
+                                        Label: item.newLabel || "",
                                         LanguageCode: lcid
                                     }
                                 ]
                             };
-                            console.log("  SetLocLabels description payload:", JSON.stringify(descPayload));
-                            promises.push(fetchJson(base + "SetLocLabels", "POST", descPayload));
+                            console.log("  SetLocLabels name payload:", JSON.stringify(namePayload));
+                            promises.push(fetchJson(base + "SetLocLabels", "POST", namePayload));
+                        }
+                        
+                        // Update description using SetLocLabels
+                        // Skip if base language description is not set (SetLocLabels requires base language to exist)
+                        if (item.newDescription !== item.targetDescription) {
+                            if (!item.baseDescription || item.baseDescription === "") {
+                                console.warn("  Skipping description save for view (base language description not set):", item.userLabel);
+                            } else {
+                                var descPayload = {
+                                    EntityMoniker: {
+                                        "@odata.id": base + "savedqueries(" + id + ")"
+                                    },
+                                    AttributeName: "description",
+                                    Labels: [
+                                        {
+                                            "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
+                                            Label: item.newDescription || "",
+                                            LanguageCode: lcid
+                                        }
+                                    ]
+                                };
+                                console.log("  SetLocLabels description payload:", JSON.stringify(descPayload));
+                                promises.push(fetchJson(base + "SetLocLabels", "POST", descPayload));
+                            }
                         }
                     }
                     
