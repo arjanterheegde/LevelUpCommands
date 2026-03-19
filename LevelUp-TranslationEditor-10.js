@@ -530,6 +530,8 @@
             promise = loadEntityTranslations().then(cacheItems);
         } else if (state.scope === "formlabels") {
             promise = loadFormLabelTranslations().then(cacheItems);
+        } else if (state.scope === "optionsets") {
+            promise = loadOptionSetTranslations().then(cacheItems);
         } else {
             promise = Promise.resolve();
         }
@@ -749,6 +751,108 @@
                 items.sort(function (a, b) {
                     return String(a.userLabel || "").localeCompare(String(b.userLabel || ""));
                 });
+                state.items = items;
+            });
+        });
+    }
+
+    function loadOptionSetTranslations() {
+        var base = Xrm.Utility.getGlobalContext().getClientUrl() + "/api/data/v9.2/";
+        
+        // First, get all attributes that are Picklist, State, or Status
+        var url = base + "EntityDefinitions(LogicalName='" + encodeURIComponent(state.entityLogicalName) + 
+                  "')/Attributes?$select=LogicalName,DisplayName,AttributeType,MetadataId" +
+                  "&$filter=(AttributeType eq Microsoft.Dynamics.CRM.AttributeTypeCode'Picklist' or " +
+                  "AttributeType eq Microsoft.Dynamics.CRM.AttributeTypeCode'State' or " +
+                  "AttributeType eq Microsoft.Dynamics.CRM.AttributeTypeCode'Status')";
+        
+        return fetchJson(url).then(function(result) {
+            if (!result || !result.value || result.value.length === 0) {
+                state.items = [];
+                return;
+            }
+            
+            // For each attribute, fetch its option set metadata
+            var promises = [];
+            
+            for (var i = 0; i < result.value.length; i++) {
+                var attr = result.value[i];
+                
+                (function(attribute) {
+                    var castType = attribute.AttributeType === "Picklist" ? "PicklistAttributeMetadata" :
+                                  attribute.AttributeType === "State" ? "StateAttributeMetadata" :
+                                  attribute.AttributeType === "Status" ? "StatusAttributeMetadata" : null;
+                    
+                    if (!castType) return;
+                    
+                    // Fetch this specific attribute with OptionSet expanded
+                    var attrUrl = base + "EntityDefinitions(LogicalName='" + encodeURIComponent(state.entityLogicalName) + 
+                                  "')/Attributes(LogicalName='" + attribute.LogicalName + 
+                                  "')/Microsoft.Dynamics.CRM." + castType +
+                                  "?$select=LogicalName,MetadataId,AttributeType" +
+                                  "&$expand=OptionSet($select=Options,IsGlobal,Name),GlobalOptionSet($select=Options,Name)";
+                    
+                    var promise = fetchJson(attrUrl).then(function(attrData) {
+                        var optionSet = attrData.GlobalOptionSet || attrData.OptionSet;
+                        if (!optionSet || !optionSet.Options) return [];
+                        
+                        // State and Status are ALWAYS local option sets, never global
+                        // Use the IsGlobal property from the optionset itself (most reliable)
+                        var isGlobal = (attribute.AttributeType !== "State" && attribute.AttributeType !== "Status") && optionSet.IsGlobal === true;
+                        var optionSetName = optionSet.Name || attrData.LogicalName;
+                        var attrDisplayName = labelText(attribute.DisplayName, state.userLcid, attribute.LogicalName);
+                        
+                        console.log("Loaded option set:", attribute.LogicalName, "Type:", attribute.AttributeType, "IsGlobal property:", optionSet.IsGlobal, "Computed isGlobal:", isGlobal, "OptionSetName:", optionSetName);
+                        
+                        var items = [];
+                        for (var j = 0; j < optionSet.Options.length; j++) {
+                            var option = optionSet.Options[j];
+                            var optionValue = option.Value;
+                            
+                            items.push({
+                                id: attribute.MetadataId + "_" + optionValue,
+                                logicalName: attribute.LogicalName,
+                                attributeName: attribute.LogicalName,
+                                attributeDisplayName: attrDisplayName,
+                                optionValue: optionValue,
+                                optionSetName: optionSetName,
+                                isGlobal: isGlobal,
+                                attributeType: attribute.AttributeType,
+                                type: "optionset",
+                                userLabel: labelText(option.Label, state.userLcid, "Option " + optionValue),
+                                baseLabel: labelText(option.Label, state.orgLcid, ""),
+                                targetLabel: labelText(option.Label, state.targetLcid, ""),
+                                newLabel: labelText(option.Label, state.targetLcid, ""),
+                                rowKey: attribute.MetadataId + "_" + optionValue
+                            });
+                        }
+                        
+                        return items;
+                    }).catch(function(err) {
+                        console.warn("Failed to load option set for attribute:", attribute.LogicalName, err);
+                        return [];
+                    });
+                    
+                    promises.push(promise);
+                })(attr);
+            }
+            
+            return Promise.all(promises).then(function(results) {
+                // Flatten all items
+                var items = [];
+                for (var i = 0; i < results.length; i++) {
+                    if (results[i] && results[i].length > 0) {
+                        items = items.concat(results[i]);
+                    }
+                }
+                
+                // Sort by attribute name, then by option value
+                items.sort(function(a, b) {
+                    var attrCompare = a.attributeDisplayName.localeCompare(b.attributeDisplayName);
+                    if (attrCompare !== 0) return attrCompare;
+                    return a.optionValue - b.optionValue;
+                });
+                
                 state.items = items;
             });
         });
@@ -1010,7 +1114,7 @@
 
     function addStyles() {
         if (document.getElementById(STYLE_ID)) return;
-        var css = "#" + ROOT_ID + "{position:fixed;top:64px;right:12px;width:700px;max-width:calc(100vw - 24px);height:calc(100vh - 76px);background:#ffffff;border:1px solid #d1d5db;border-radius:16px;box-shadow:0 20px 50px rgba(0,0,0,.2);z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;display:flex;flex-direction:column;overflow:hidden;}#" + ROOT_ID + " *{box-sizing:border-box;}#" + ROOT_ID + " .hd{padding:20px 22px 22px;border-bottom:1px solid #e5e7eb;background:linear-gradient(180deg,#fafbfc 0%,#f5f7fa 100%);}#" + ROOT_ID + " .top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px;}#" + ROOT_ID + " .title{font-size:18px;font-weight:700;line-height:1.3;color:#0d1421;letter-spacing:-.01em;}#" + ROOT_ID + " .sub{font-size:12px;color:#6b7280;margin-top:5px;line-height:1.5;}#" + ROOT_ID + " .close{border:1px solid #d1d5db;background:#fff;border-radius:8px;padding:7px 13px;font-size:12px;font-weight:600;cursor:pointer;appearance:none;-webkit-appearance:none;transition:all .15s ease;color:#374151;}#" + ROOT_ID + " .close:hover{background:#f9fafb;border-color:#9ca3af;}#" + ROOT_ID + " .search{width:100%;margin-bottom:16px;padding:10px 13px;border:1px solid #d1d5db;border-radius:10px;font-size:13px;outline:none;transition:border-color .15s ease;}#" + ROOT_ID + " .search:focus{border-color:#0f6cbd;box-shadow:0 0 0 3px rgba(15,108,189,.1);}#" + ROOT_ID + " .lu-collapse-toggle{display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:10px 0;border-bottom:1px solid #e5e7eb;margin-bottom:16px;user-select:none;}#" + ROOT_ID + " .lu-collapse-title{font-size:11px;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:.03em;}#" + ROOT_ID + " .lu-collapse-icon{font-size:16px;color:#6b7280;transition:transform .2s ease;line-height:1;}#" + ROOT_ID + " .lu-collapse-content{overflow:hidden;transition:max-height .3s ease,opacity .3s ease;}#" + ROOT_ID + " .lu-collapse-content.collapsed{max-height:0!important;opacity:0;pointer-events:none;}#" + ROOT_ID + " .lu-switch-row{display:flex;align-items:center;gap:12px;margin-bottom:18px;}#" + ROOT_ID + " .lu-switch-label{font-size:13px;color:#374151;font-weight:600;text-transform:uppercase;letter-spacing:.02em;font-size:11px;}#" + ROOT_ID + " .lu-segmented{display:inline-flex;align-items:stretch;gap:0;padding:3px;border:1px solid #d1dae6;background:#e8edf5;border-radius:10px;box-shadow:inset 0 1px 2px rgba(16,24,40,.06);}#" + ROOT_ID + " .lu-segment{appearance:none;-webkit-appearance:none;border:0 !important;outline:none;background:transparent;color:#4b5563;border-radius:7px;padding:8px 16px;font-size:12px;font-weight:600;line-height:1;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);white-space:nowrap;position:relative;}#" + ROOT_ID + " .lu-segment:hover:not(.active){background:rgba(255,255,255,.5);}#" + ROOT_ID + " .lu-segment.active{background:#ffffff;color:#0f6cbd;box-shadow:0 2px 4px rgba(16,24,40,.1),0 1px 2px rgba(16,24,40,.06),inset 0 0 0 1px rgba(15,108,189,.1);}#" + ROOT_ID + " .filter-section{margin-bottom:18px;}#" + ROOT_ID + " .filter-section:last-child{margin-bottom:8px;}#" + ROOT_ID + " .filter-label{font-size:11px;color:#374151;font-weight:700;text-transform:uppercase;letter-spacing:.03em;margin-bottom:10px;}#" + ROOT_ID + " .lang-selector{width:100%;padding:10px 13px;border:1px solid #d1d5db;border-radius:10px;font-size:13px;outline:none;transition:border-color .15s ease;background:#fff;}#" + ROOT_ID + " .lang-selector:focus{border-color:#0f6cbd;box-shadow:0 0 0 3px rgba(15,108,189,.1);}#" + ROOT_ID + " .lang-selector:disabled{background:#f9fafb;color:#9ca3af;cursor:not-allowed;opacity:0.7;}#" + ROOT_ID + " .lang-info{margin-top:10px;padding:10px 13px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;font-size:11px;color:#0369a1;line-height:1.5;}#" + ROOT_ID + " .toolbar{display:flex;gap:8px;flex-wrap:wrap;padding:13px 18px;border-bottom:1px solid #e5e7eb;background:#fafbfc;}#" + ROOT_ID + " .btn{border:1px solid #d1d5db;background:#fff;border-radius:8px;padding:9px 15px;font-size:12px;font-weight:600;cursor:pointer;appearance:none;-webkit-appearance:none;transition:all .15s ease;color:#374151;}#" + ROOT_ID + " .btn:hover{background:#f3f4f6;}#" + ROOT_ID + " .btn.primary{background:#0f6cbd;color:#fff;border-color:#0f6cbd;}#" + ROOT_ID + " .btn.primary:hover{background:#0c5ba6;}#" + ROOT_ID + " .btn.primary:disabled{background:#e5e7eb;border-color:#d1d5db;color:#9ca3af;cursor:not-allowed;box-shadow:none;}#" + ROOT_ID + " .btn.primary:disabled:hover{background:#e5e7eb;}#" + ROOT_ID + " .status{padding:11px 18px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:12px;color:#374151;font-weight:500;}#" + ROOT_ID + " .list{flex:1;overflow:auto;background:#f5f7fa;padding:16px;}#" + ROOT_ID + " .item{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 2px rgba(0,0,0,.04);transition:box-shadow .15s ease;}#" + ROOT_ID + " .item:hover{box-shadow:0 2px 8px rgba(0,0,0,.08);}#" + ROOT_ID + " .item-hd{margin-bottom:12px;}#" + ROOT_ID + " .lbl{font-size:14px;font-weight:600;color:#111827;line-height:1.4;margin-bottom:4px;}#" + ROOT_ID + " .meta{font-size:11px;color:#6b7280;margin-bottom:10px;word-break:break-word;font-family:Monaco,Consolas,monospace;background:#f9fafb;padding:3px 8px;border-radius:5px;display:inline-block;}#" + ROOT_ID + " .lu-chip-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}#" + ROOT_ID + " .lu-chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;border-radius:6px;padding:5px 11px;white-space:nowrap;border:1px solid;line-height:1.3;text-transform:capitalize;}#" + ROOT_ID + " .lu-chip-dot{width:5px;height:5px;border-radius:999px;background:currentColor;display:inline-block;}#" + ROOT_ID + " .lu-chip-type{background:#e0e7ff;border-color:#c7d2fe;color:#3730a3;}#" + ROOT_ID + " .lu-chip-status.translated{background:#d1fae5;border-color:#6ee7b7;color:#065f46;}#" + ROOT_ID + " .lu-chip-status.missing{background:#fee2e2;border-color:#fecaca;color:#991b1b;}#" + ROOT_ID + " .trans-section{margin-top:12px;}#" + ROOT_ID + " .trans-label{font-size:11px;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:.02em;margin-bottom:6px;}#" + ROOT_ID + " .trans-text{padding:10px 12px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;font-size:13px;color:#111827;line-height:1.5;min-height:38px;margin-bottom:10px;}#" + ROOT_ID + " .input,#" + ROOT_ID + " .ta{width:100%;padding:10px 12px;border:1px solid #d1d5db;border-radius:8px;font-size:13px;background:#fff;color:#111827;transition:border-color .15s ease;}#" + ROOT_ID + " .input:focus,#" + ROOT_ID + " .ta:focus{outline:none;border-color:#0f6cbd;box-shadow:0 0 0 3px rgba(15,108,189,.1);}#" + ROOT_ID + " .ta{min-height:70px;resize:vertical;font-family:inherit;}#" + ROOT_ID + " .chk{display:flex;align-items:center;gap:8px;font-size:12px;color:#374151;padding:0;}#" + ROOT_ID + " .chk input{width:15px;height:15px;cursor:pointer;}#" + ROOT_ID + " .empty{text-align:center;color:#6b7280;padding:40px 20px;font-size:13px;}";
+        var css = "#" + ROOT_ID + "{position:fixed;top:64px;right:12px;width:700px;max-width:calc(100vw - 24px);height:calc(100vh - 76px);background:#ffffff;border:1px solid #d1d5db;border-radius:16px;box-shadow:0 20px 50px rgba(0,0,0,.2);z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;display:flex;flex-direction:column;overflow:hidden;}#" + ROOT_ID + " *{box-sizing:border-box;}#" + ROOT_ID + " .hd{padding:20px 22px 22px;border-bottom:1px solid #e5e7eb;background:linear-gradient(180deg,#fafbfc 0%,#f5f7fa 100%);}#" + ROOT_ID + " .top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px;}#" + ROOT_ID + " .title{font-size:18px;font-weight:700;line-height:1.3;color:#0d1421;letter-spacing:-.01em;}#" + ROOT_ID + " .sub{font-size:12px;color:#6b7280;margin-top:5px;line-height:1.5;}#" + ROOT_ID + " .close{border:1px solid #d1d5db;background:#fff;border-radius:8px;padding:7px 13px;font-size:12px;font-weight:600;cursor:pointer;appearance:none;-webkit-appearance:none;transition:all .15s ease;color:#374151;}#" + ROOT_ID + " .close:hover{background:#f9fafb;border-color:#9ca3af;}#" + ROOT_ID + " .search{width:100%;margin-bottom:16px;padding:10px 13px;border:1px solid #d1d5db;border-radius:10px;font-size:13px;outline:none;transition:border-color .15s ease;}#" + ROOT_ID + " .search:focus{border-color:#0f6cbd;box-shadow:0 0 0 3px rgba(15,108,189,.1);}#" + ROOT_ID + " .lu-collapse-toggle{display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:10px 0;border-bottom:1px solid #e5e7eb;margin-bottom:16px;user-select:none;}#" + ROOT_ID + " .lu-collapse-title{font-size:11px;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:.03em;}#" + ROOT_ID + " .lu-collapse-icon{font-size:16px;color:#6b7280;transition:transform .2s ease;line-height:1;}#" + ROOT_ID + " .lu-collapse-content{overflow:hidden;transition:max-height .3s ease,opacity .3s ease;}#" + ROOT_ID + " .lu-collapse-content.collapsed{max-height:0!important;opacity:0;pointer-events:none;}#" + ROOT_ID + " .lu-switch-row{display:flex;align-items:center;gap:12px;margin-bottom:18px;}#" + ROOT_ID + " .lu-switch-label{font-size:13px;color:#374151;font-weight:600;text-transform:uppercase;letter-spacing:.02em;font-size:11px;}#" + ROOT_ID + " .lu-segmented{display:inline-flex;align-items:stretch;gap:0;padding:3px;border:1px solid #d1dae6;background:#e8edf5;border-radius:10px;box-shadow:inset 0 1px 2px rgba(16,24,40,.06);}#" + ROOT_ID + " .lu-segment{appearance:none;-webkit-appearance:none;border:0 !important;outline:none;background:transparent;color:#4b5563;border-radius:7px;padding:8px 16px;font-size:12px;font-weight:600;line-height:1;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);white-space:nowrap;position:relative;}#" + ROOT_ID + " .lu-segment:hover:not(.active){background:rgba(255,255,255,.5);}#" + ROOT_ID + " .lu-segment.active{background:#ffffff;color:#0f6cbd;box-shadow:0 2px 4px rgba(16,24,40,.1),0 1px 2px rgba(16,24,40,.06),inset 0 0 0 1px rgba(15,108,189,.1);}#" + ROOT_ID + " .filter-section{margin-bottom:18px;}#" + ROOT_ID + " .filter-section:last-child{margin-bottom:8px;}#" + ROOT_ID + " .filter-label{font-size:11px;color:#374151;font-weight:700;text-transform:uppercase;letter-spacing:.03em;margin-bottom:10px;}#" + ROOT_ID + " .lang-selector{width:100%;padding:10px 13px;border:1px solid #d1d5db;border-radius:10px;font-size:13px;outline:none;transition:border-color .15s ease;background:#fff;}#" + ROOT_ID + " .lang-selector:focus{border-color:#0f6cbd;box-shadow:0 0 0 3px rgba(15,108,189,.1);}#" + ROOT_ID + " .lang-selector:disabled{background:#f9fafb;color:#9ca3af;cursor:not-allowed;opacity:0.7;}#" + ROOT_ID + " .lang-info{margin-top:10px;padding:10px 13px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;font-size:11px;color:#0369a1;line-height:1.5;}#" + ROOT_ID + " .toolbar{display:flex;gap:8px;flex-wrap:wrap;padding:13px 18px;border-bottom:1px solid #e5e7eb;background:#fafbfc;}#" + ROOT_ID + " .btn{border:1px solid #d1d5db;background:#fff;border-radius:8px;padding:9px 15px;font-size:12px;font-weight:600;cursor:pointer;appearance:none;-webkit-appearance:none;transition:all .15s ease;color:#374151;}#" + ROOT_ID + " .btn:hover{background:#f3f4f6;}#" + ROOT_ID + " .btn.primary{background:#0f6cbd;color:#fff;border-color:#0f6cbd;}#" + ROOT_ID + " .btn.primary:hover{background:#0c5ba6;}#" + ROOT_ID + " .btn.primary:disabled{background:#e5e7eb;border-color:#d1d5db;color:#9ca3af;cursor:not-allowed;box-shadow:none;}#" + ROOT_ID + " .btn.primary:disabled:hover{background:#e5e7eb;}#" + ROOT_ID + " .status{padding:11px 18px;border-bottom:1px solid #e5e7eb;background:#f9fafb;font-size:12px;color:#374151;font-weight:500;}#" + ROOT_ID + " .list{flex:1;overflow:auto;background:#f5f7fa;padding:16px;}#" + ROOT_ID + " .item{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 2px rgba(0,0,0,.04);transition:box-shadow .15s ease;}#" + ROOT_ID + " .item:hover{box-shadow:0 2px 8px rgba(0,0,0,.08);}#" + ROOT_ID + " .item-hd{margin-bottom:12px;}#" + ROOT_ID + " .lbl{font-size:14px;font-weight:600;color:#111827;line-height:1.4;margin-bottom:4px;}#" + ROOT_ID + " .meta{font-size:11px;color:#6b7280;margin-bottom:10px;word-break:break-word;font-family:Monaco,Consolas,monospace;background:#f9fafb;padding:3px 8px;border-radius:5px;display:inline-block;}#" + ROOT_ID + " .lu-chip-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}#" + ROOT_ID + " .lu-chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;border-radius:6px;padding:5px 11px;white-space:nowrap;border:1px solid;line-height:1.3;text-transform:capitalize;}#" + ROOT_ID + " .lu-chip-dot{width:5px;height:5px;border-radius:999px;background:currentColor;display:inline-block;}#" + ROOT_ID + " .lu-chip-type{background:#e0e7ff;border-color:#c7d2fe;color:#3730a3;}#" + ROOT_ID + " .lu-chip-status.translated{background:#d1fae5;border-color:#6ee7b7;color:#065f46;}#" + ROOT_ID + " .lu-chip-status.missing{background:#fee2e2;border-color:#fecaca;color:#991b1b;}#" + ROOT_ID + " .trans-section{margin-top:12px;}#" + ROOT_ID + " .trans-label{font-size:11px;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:.02em;margin-bottom:6px;}#" + ROOT_ID + " .trans-text{padding:10px 12px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;font-size:13px;color:#111827;line-height:1.5;min-height:38px;margin-bottom:10px;}#" + ROOT_ID + " .input,#" + ROOT_ID + " .ta{width:100%;padding:10px 12px;border:1px solid #d1d5db;border-radius:8px;font-size:13px;background:#fff;color:#111827;transition:border-color .15s ease;}#" + ROOT_ID + " .input:focus,#" + ROOT_ID + " .ta:focus{outline:none;border-color:#0f6cbd;box-shadow:0 0 0 3px rgba(15,108,189,.1);}#" + ROOT_ID + " .ta{min-height:70px;resize:vertical;font-family:inherit;}#" + ROOT_ID + " .chk{display:flex;align-items:center;gap:8px;font-size:12px;color:#374151;padding:0;}#" + ROOT_ID + " .chk input{width:15px;height:15px;cursor:pointer;}#" + ROOT_ID + " .empty{text-align:center;color:#6b7280;padding:40px 20px;font-size:13px;}#" + ROOT_ID + " .optionset-header{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);border-radius:12px;padding:14px 18px;margin-bottom:14px;box-shadow:0 4px 12px rgba(102,126,234,.15);}#" + ROOT_ID + " .optionset-header-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:15px;font-weight:700;color:#ffffff;line-height:1.4;margin-bottom:6px;}#" + ROOT_ID + " .optionset-header-badge{display:inline-flex;align-items:center;padding:4px 10px;border-radius:6px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;line-height:1;}#" + ROOT_ID + " .optionset-header-badge.global{background:rgba(255,255,255,.25);color:#ffffff;border:1px solid rgba(255,255,255,.3);}#" + ROOT_ID + " .optionset-header-badge.type{background:rgba(255,255,255,.15);color:#ffffff;border:1px solid rgba(255,255,255,.2);}#" + ROOT_ID + " .optionset-header-meta{font-size:12px;color:rgba(255,255,255,.85);font-family:Monaco,Consolas,monospace;font-weight:500;}#" + ROOT_ID + " .lu-chip-locked{background:#fef3c7;border-color:#fde68a;color:#92400e;}";
         var st = document.createElement("style");
         st.id = STYLE_ID;
         st.appendChild(document.createTextNode(css));
@@ -1020,7 +1124,7 @@
     function renderShell() {
         var host = document.createElement("div");
         host.id = ROOT_ID;
-        host.innerHTML = "<div class=\"hd\"><div class=\"top\"><div><div class=\"title\">Translation Editor</div><div class=\"sub\" id=\"lu_subtitle\">" + esc(state.entityName) + "</div></div><button class=\"close\" type=\"button\" id=\"lu_close\">Close</button></div><input class=\"search\" id=\"lu_search\" type=\"text\" placeholder=\"Search translations...\"><div class=\"lu-collapse-toggle\" id=\"lu_collapse_toggle\"><span class=\"lu-collapse-title\">⚙️ FILTERS &amp; SETTINGS</span><span class=\"lu-collapse-icon\" id=\"lu_collapse_icon\">▼</span></div><div class=\"lu-collapse-content\" id=\"lu_collapse_content\"><div class=\"lu-switch-row\"><div class=\"lu-switch-label\">Translate</div><div class=\"lu-segmented\"><button class=\"lu-segment active\" data-scope=\"fields\" type=\"button\">Fields</button><button class=\"lu-segment\" data-scope=\"entity\" type=\"button\">Entity</button><button class=\"lu-segment\" data-scope=\"forms\" type=\"button\">Forms</button><button class=\"lu-segment\" data-scope=\"formlabels\" type=\"button\">Form Labels</button><button class=\"lu-segment\" data-scope=\"views\" type=\"button\">Views</button></div></div><div class=\"filter-section\"><div class=\"filter-label\">Target Language</div><select class=\"lang-selector\" id=\"lu_lang_select\"></select><label class=\"chk\" style=\"margin-top:10px;\"><input type=\"checkbox\" id=\"lu_show_all_langs\"> Show all languages (including not provisioned)</label><div class=\"lang-info\" id=\"lu_lang_info\">Loading languages...</div></div><div class=\"filter-section\" id=\"lu_display_options_section\"><div class=\"filter-label\">Display Options</div><label class=\"chk\"><input type=\"checkbox\" id=\"lu_show_locked\"> Show locked fields (non-customizable)</label></div><div class=\"filter-section\"><div class=\"filter-label\">Solution Tracking (ALM)</div><label class=\"chk\" style=\"margin-bottom:10px;\"><input type=\"checkbox\" id=\"lu_solution_tracking\"> Track changes in solution</label><select class=\"lang-selector\" id=\"lu_solution_select\" style=\"display:none;\"></select><div class=\"lang-info\" id=\"lu_solution_info\" style=\"display:none;\">Select a solution to automatically add modified components</div></div></div></div><div class=\"toolbar\"><button class=\"btn primary\" type=\"button\" id=\"lu_save\">Save Translations</button><button class=\"btn\" type=\"button\" id=\"lu_refresh\">Refresh</button></div><div class=\"status\" id=\"lu_status\">Loading...</div><div class=\"list\" id=\"lu_list\"></div>";
+        host.innerHTML = "<div class=\"hd\"><div class=\"top\"><div><div class=\"title\">Translation Editor</div><div class=\"sub\" id=\"lu_subtitle\">" + esc(state.entityName) + "</div></div><button class=\"close\" type=\"button\" id=\"lu_close\">Close</button></div><input class=\"search\" id=\"lu_search\" type=\"text\" placeholder=\"Search translations...\"><div class=\"lu-collapse-toggle\" id=\"lu_collapse_toggle\"><span class=\"lu-collapse-title\">⚙️ FILTERS &amp; SETTINGS</span><span class=\"lu-collapse-icon\" id=\"lu_collapse_icon\">▼</span></div><div class=\"lu-collapse-content\" id=\"lu_collapse_content\"><div class=\"lu-switch-row\"><div class=\"lu-switch-label\">Translate</div><div class=\"lu-segmented\"><button class=\"lu-segment active\" data-scope=\"fields\" type=\"button\">Fields</button><button class=\"lu-segment\" data-scope=\"entity\" type=\"button\">Entity</button><button class=\"lu-segment\" data-scope=\"forms\" type=\"button\">Forms</button><button class=\"lu-segment\" data-scope=\"formlabels\" type=\"button\">Form Labels</button><button class=\"lu-segment\" data-scope=\"views\" type=\"button\">Views</button><button class=\"lu-segment\" data-scope=\"optionsets\" type=\"button\">Option Sets</button></div></div><div class=\"filter-section\"><div class=\"filter-label\">Target Language</div><select class=\"lang-selector\" id=\"lu_lang_select\"></select><label class=\"chk\" style=\"margin-top:10px;\"><input type=\"checkbox\" id=\"lu_show_all_langs\"> Show all languages (including not provisioned)</label><div class=\"lang-info\" id=\"lu_lang_info\">Loading languages...</div></div><div class=\"filter-section\" id=\"lu_display_options_section\"><div class=\"filter-label\">Display Options</div><label class=\"chk\"><input type=\"checkbox\" id=\"lu_show_locked\"> Show locked fields (non-customizable)</label></div><div class=\"filter-section\"><div class=\"filter-label\">Solution Tracking (ALM)</div><label class=\"chk\" style=\"margin-bottom:10px;\"><input type=\"checkbox\" id=\"lu_solution_tracking\"> Track changes in solution</label><select class=\"lang-selector\" id=\"lu_solution_select\" style=\"display:none;\"></select><div class=\"lang-info\" id=\"lu_solution_info\" style=\"display:none;\">Select a solution to automatically add modified components</div></div></div></div><div class=\"toolbar\"><button class=\"btn primary\" type=\"button\" id=\"lu_save\">Save Translations</button><button class=\"btn\" type=\"button\" id=\"lu_refresh\">Refresh</button></div><div class=\"status\" id=\"lu_status\">Loading...</div><div class=\"list\" id=\"lu_list\"></div>";
         document.body.appendChild(host);
         
         document.getElementById("lu_close").onclick = removePanel;
@@ -1387,6 +1491,11 @@
             html.push("<div class=\"meta\">" + esc(item.logicalName) + "</div>");
         }
         
+        // For option sets, show simplified metadata (value only, since attribute is in header)
+        if (item.type === "optionset") {
+            html.push("<div class=\"meta\">Value: " + item.optionValue + "</div>");
+        }
+        
         html.push("<div class=\"lu-chip-row\">");
         
         var typeLabel = item.type === "field" ? "Field" :
@@ -1395,7 +1504,8 @@
                        item.type === "entity-name" ? "Entity Name" :
                        item.type === "entity-plural" ? "Plural Name" :
                        item.type === "entity-description" ? "Description" :
-                       item.type === "formlabel" ? "Form Label" : item.type;
+                       item.type === "formlabel" ? "Form Label" :
+                       item.type === "optionset" ? "Option Set" : item.type;
         html.push("<span class=\"lu-chip lu-chip-type\">" + esc(typeLabel) + "</span>");
         
         // Show locked indicator for non-customizable fields
@@ -1491,9 +1601,32 @@
         
         var html = [];
         var shown = 0;
+        var lastAttributeName = null;
         
         for (var i = 0; i < state.items.length; i++) {
             if (!matchItem(state.items[i])) continue;
+            
+            // For option sets, add a header when we encounter a new attribute
+            if (state.scope === "optionsets" && state.items[i].attributeName !== lastAttributeName) {
+                var isGlobal = state.items[i].isGlobal;
+                var typeLabel = state.items[i].attributeType === "State" ? "State" :
+                               state.items[i].attributeType === "Status" ? "Status" :
+                               state.items[i].attributeType === "Picklist" ? "Choice" : "Option Set";
+                
+                html.push("<div class=\"optionset-header\">");
+                html.push("<div class=\"optionset-header-title\">");
+                html.push(esc(state.items[i].attributeDisplayName));
+                if (isGlobal) {
+                    html.push("<span class=\"optionset-header-badge global\">Global</span>");
+                }
+                html.push("<span class=\"optionset-header-badge type\">" + typeLabel + "</span>");
+                html.push("</div>");
+                html.push("<div class=\"optionset-header-meta\">" + esc(state.items[i].attributeName) + "</div>");
+                html.push("</div>");
+                
+                lastAttributeName = state.items[i].attributeName;
+            }
+            
             shown++;
             html.push(renderItem(state.items[i]));
         }
@@ -1602,11 +1735,12 @@
 
     function getComponentType(scope, item) {
         // Component types from Microsoft.Crm.Sdk.SolutionComponentType
-        // Entity = 1, Attribute = 2, SavedQuery = 26, SystemForm = 60
+        // Entity = 1, Attribute = 2, SavedQuery = 26, SystemForm = 60, OptionSet = 9
         if (scope === "fields") return 2; // Attribute
         if (scope === "entity") return 1; // Entity
         if (scope === "views") return 26; // SavedQuery
         if (scope === "forms" || scope === "formlabels") return 60; // SystemForm
+        if (scope === "optionsets") return 2; // Attribute (option sets are part of attributes)
         return null;
     }
 
@@ -1878,6 +2012,8 @@
             promise = saveViewTranslations(updates, lcid);
         } else if (scope === "formlabels") {
             promise = saveFormLabelTranslations(updates, lcid);
+        } else if (scope === "optionsets") {
+            promise = saveOptionSetTranslations(updates, lcid);
         } else {
             promise = Promise.resolve();
         }
@@ -1917,9 +2053,14 @@
             var item = updates[i];
             var compId;
             
-            if (scope === "fields" || scope === "entity") {
+            if (scope === "fields" || scope === "entity" || scope === "optionsets") {
                 // Use MetadataId for attributes and entities
-                compId = item.id;
+                // For optionsets, extract the attribute MetadataId (before the underscore)
+                if (scope === "optionsets" && item.id && item.id.indexOf("_") > 0) {
+                    compId = item.id.split("_")[0];
+                } else {
+                    compId = item.id;
+                }
             } else if (scope === "views") {
                 // Use savedqueryid for views
                 compId = String(item.id).replace(/[{}]/g, "").toLowerCase();
@@ -2503,6 +2644,90 @@
             return fetchJson(base + "PublishXml", "POST", publishPayload).then(function () {
                 console.log("Published " + state.entityLogicalName + " successfully.");
                 console.log("Note: You may need to refresh CE (Ctrl+F5) or clear browser cache to see changes.");
+                return saved;
+            }).catch(function (publishErr) {
+                console.warn("Publish failed. Changes saved but may require manual publish:", publishErr);
+                // Try PublishAllXml as fallback
+                return fetchJson(base + "PublishAllXml", "POST", {}).then(function() {
+                    console.log("PublishAllXml succeeded");
+                    return saved;
+                }).catch(function(err2) {
+                    console.warn("PublishAllXml also failed:", err2);
+                    return saved;
+                });
+            });
+        });
+    }
+
+    function saveOptionSetTranslations(updates, lcid) {
+        var base = Xrm.Utility.getGlobalContext().getClientUrl() + "/api/data/v9.2/";
+        var chain = Promise.resolve();
+        var saved = 0;
+        
+        console.log("saveOptionSetTranslations - lcid:", lcid, "updates:", updates.length);
+        
+        for (var i = 0; i < updates.length; i++) {
+            (function(item) {
+                chain = chain.then(function() {
+                    // Skip if no change
+                    if (item.newLabel === item.targetLabel) {
+                        return Promise.resolve();
+                    }
+                    
+                    console.log("  Updating option set value:", item.attributeName, "value:", item.optionValue, "type:", item.attributeType, "isGlobal:", item.isGlobal, "to:", item.newLabel);
+                    
+                    // Create proper Label structure
+                    var labelObject = {
+                        "@odata.type": "Microsoft.Dynamics.CRM.Label",
+                        "LocalizedLabels": [{
+                            "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
+                            "Label": item.newLabel || "",
+                            "LanguageCode": lcid,
+                            "IsManaged": false
+                        }],
+                        "UserLocalizedLabel": {
+                            "@odata.type": "Microsoft.Dynamics.CRM.LocalizedLabel",
+                            "Label": item.newLabel || "",
+                            "LanguageCode": lcid,
+                            "IsManaged": false
+                        }
+                    };
+                    
+                    // Use UpdateOptionValue for all types (Picklist, State, Status)
+                    var optionPayload = {
+                        Value: item.optionValue,
+                        Label: labelObject,
+                        MergeLabels: true
+                    };
+                    
+                    // For global option sets, use OptionSetName
+                    // For local option sets (including State/Status), use EntityLogicalName + AttributeLogicalName
+                    if (item.isGlobal) {
+                        optionPayload.OptionSetName = item.optionSetName;
+                        console.log("  UpdateOptionValue (global) payload:", JSON.stringify(optionPayload));
+                    } else {
+                        optionPayload.EntityLogicalName = state.entityLogicalName;
+                        optionPayload.AttributeLogicalName = item.attributeName;
+                        console.log("  UpdateOptionValue (local) payload:", JSON.stringify(optionPayload));
+                    }
+                    
+                    return fetchJson(base + "UpdateOptionValue", "POST", optionPayload).then(function() {
+                        saved++;
+                    });
+                });
+            })(updates[i]);
+        }
+        
+        return chain.then(function() {
+            console.log("Saved " + saved + " option set translation(s), now publishing...");
+            
+            // Publish the entity
+            var publishPayload = {
+                ParameterXml: "<importexportxml><entities><entity>" + state.entityLogicalName + "</entity></entities></importexportxml>"
+            };
+            
+            return fetchJson(base + "PublishXml", "POST", publishPayload).then(function () {
+                console.log("Published " + state.entityLogicalName + " option sets successfully.");
                 return saved;
             }).catch(function (publishErr) {
                 console.warn("Publish failed. Changes saved but may require manual publish:", publishErr);
