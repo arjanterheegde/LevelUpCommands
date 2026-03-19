@@ -61,6 +61,8 @@
         if (showAllLangsCheck) {
             showAllLangsCheck.checked = state.showAllLanguages;
         }
+        // Set initial display options visibility
+        updateDisplayOptionsVisibility();
         // Load solutions for solution tracking
         return loadSolutions().then(function() {
             updateSolutionDisplay();
@@ -732,12 +734,9 @@
     function loadEntityTranslations() {
         var base = Xrm.Utility.getGlobalContext().getClientUrl() + "/api/data/v9.2/";
         var key = "EntityDefinitions(LogicalName=%27" + encodeURIComponent(state.entityLogicalName) + "%27)";
+        var url = base + key + "?$select=LogicalName,DisplayName,DisplayCollectionName,Description,MetadataId";
         
-        // Force cache refresh with timestamp + random component
-        var cacheBuster = "&_t=" + new Date().getTime() + "&_r=" + Math.random().toString(36).substr(2, 9);
-        var url = base + key + "?$select=LogicalName,DisplayName,DisplayCollectionName,Description,MetadataId" + cacheBuster;
-        
-        console.log("Loading entity translations with cache buster:", cacheBuster);
+        console.log("Loading entity translations (cache busting via headers only)");
         
         return fetchJson(url).then(function (entity) {
             var items = [];
@@ -998,7 +997,7 @@
     function renderShell() {
         var host = document.createElement("div");
         host.id = ROOT_ID;
-        host.innerHTML = "<div class=\"hd\"><div class=\"top\"><div><div class=\"title\">Translation Editor</div><div class=\"sub\" id=\"lu_subtitle\">" + esc(state.entityName) + "</div></div><button class=\"close\" type=\"button\" id=\"lu_close\">Close</button></div><input class=\"search\" id=\"lu_search\" type=\"text\" placeholder=\"Search translations...\"><div class=\"lu-collapse-toggle\" id=\"lu_collapse_toggle\"><span class=\"lu-collapse-title\">⚙️ FILTERS &amp; SETTINGS</span><span class=\"lu-collapse-icon\" id=\"lu_collapse_icon\">▼</span></div><div class=\"lu-collapse-content\" id=\"lu_collapse_content\"><div class=\"lu-switch-row\"><div class=\"lu-switch-label\">Translate</div><div class=\"lu-segmented\"><button class=\"lu-segment active\" data-scope=\"fields\" type=\"button\">Fields</button><button class=\"lu-segment\" data-scope=\"entity\" type=\"button\">Entity</button><button class=\"lu-segment\" data-scope=\"forms\" type=\"button\">Forms</button><button class=\"lu-segment\" data-scope=\"formlabels\" type=\"button\">Form Labels</button><button class=\"lu-segment\" data-scope=\"views\" type=\"button\">Views</button></div></div><div class=\"filter-section\"><div class=\"filter-label\">Target Language</div><select class=\"lang-selector\" id=\"lu_lang_select\"></select><label class=\"chk\" style=\"margin-top:10px;\"><input type=\"checkbox\" id=\"lu_show_all_langs\"> Show all languages (including not provisioned)</label><div class=\"lang-info\" id=\"lu_lang_info\">Loading languages...</div></div><div class=\"filter-section\"><div class=\"filter-label\">Display Options</div><label class=\"chk\"><input type=\"checkbox\" id=\"lu_show_locked\"> Show locked fields (non-customizable)</label></div><div class=\"filter-section\"><div class=\"filter-label\">Solution Tracking (ALM)</div><label class=\"chk\" style=\"margin-bottom:10px;\"><input type=\"checkbox\" id=\"lu_solution_tracking\"> Track changes in solution</label><select class=\"lang-selector\" id=\"lu_solution_select\" style=\"display:none;\"></select><div class=\"lang-info\" id=\"lu_solution_info\" style=\"display:none;\">Select a solution to automatically add modified components</div></div></div></div><div class=\"toolbar\"><button class=\"btn primary\" type=\"button\" id=\"lu_save\">Save Translations</button><button class=\"btn\" type=\"button\" id=\"lu_refresh\">Refresh</button></div><div class=\"status\" id=\"lu_status\">Loading...</div><div class=\"list\" id=\"lu_list\"></div>";
+        host.innerHTML = "<div class=\"hd\"><div class=\"top\"><div><div class=\"title\">Translation Editor</div><div class=\"sub\" id=\"lu_subtitle\">" + esc(state.entityName) + "</div></div><button class=\"close\" type=\"button\" id=\"lu_close\">Close</button></div><input class=\"search\" id=\"lu_search\" type=\"text\" placeholder=\"Search translations...\"><div class=\"lu-collapse-toggle\" id=\"lu_collapse_toggle\"><span class=\"lu-collapse-title\">⚙️ FILTERS &amp; SETTINGS</span><span class=\"lu-collapse-icon\" id=\"lu_collapse_icon\">▼</span></div><div class=\"lu-collapse-content\" id=\"lu_collapse_content\"><div class=\"lu-switch-row\"><div class=\"lu-switch-label\">Translate</div><div class=\"lu-segmented\"><button class=\"lu-segment active\" data-scope=\"fields\" type=\"button\">Fields</button><button class=\"lu-segment\" data-scope=\"entity\" type=\"button\">Entity</button><button class=\"lu-segment\" data-scope=\"forms\" type=\"button\">Forms</button><button class=\"lu-segment\" data-scope=\"formlabels\" type=\"button\">Form Labels</button><button class=\"lu-segment\" data-scope=\"views\" type=\"button\">Views</button></div></div><div class=\"filter-section\"><div class=\"filter-label\">Target Language</div><select class=\"lang-selector\" id=\"lu_lang_select\"></select><label class=\"chk\" style=\"margin-top:10px;\"><input type=\"checkbox\" id=\"lu_show_all_langs\"> Show all languages (including not provisioned)</label><div class=\"lang-info\" id=\"lu_lang_info\">Loading languages...</div></div><div class=\"filter-section\" id=\"lu_display_options_section\"><div class=\"filter-label\">Display Options</div><label class=\"chk\"><input type=\"checkbox\" id=\"lu_show_locked\"> Show locked fields (non-customizable)</label></div><div class=\"filter-section\"><div class=\"filter-label\">Solution Tracking (ALM)</div><label class=\"chk\" style=\"margin-bottom:10px;\"><input type=\"checkbox\" id=\"lu_solution_tracking\"> Track changes in solution</label><select class=\"lang-selector\" id=\"lu_solution_select\" style=\"display:none;\"></select><div class=\"lang-info\" id=\"lu_solution_info\" style=\"display:none;\">Select a solution to automatically add modified components</div></div></div></div><div class=\"toolbar\"><button class=\"btn primary\" type=\"button\" id=\"lu_save\">Save Translations</button><button class=\"btn\" type=\"button\" id=\"lu_refresh\">Refresh</button></div><div class=\"status\" id=\"lu_status\">Loading...</div><div class=\"list\" id=\"lu_list\"></div>";
         document.body.appendChild(host);
         
         document.getElementById("lu_close").onclick = removePanel;
@@ -1146,6 +1145,10 @@
                 var sbs = host.querySelectorAll(".lu-segment");
                 for (var si = 0; si < sbs.length; si++) sbs[si].className = "lu-segment";
                 t.className = "lu-segment active";
+                
+                // Update display options visibility
+                updateDisplayOptionsVisibility();
+                
                 loadTranslations().then(function () {
                     renderItems();
                     setStatus("Ready");
@@ -1153,6 +1156,18 @@
                 return;
             }
         };
+    }
+
+    function updateDisplayOptionsVisibility() {
+        var displayOptionsSection = document.getElementById("lu_display_options_section");
+        if (displayOptionsSection) {
+            // Only show display options for fields scope
+            if (state.scope === "fields") {
+                displayOptionsSection.style.display = "block";
+            } else {
+                displayOptionsSection.style.display = "none";
+            }
+        }
     }
 
     function updateSolutionDisplay() {
