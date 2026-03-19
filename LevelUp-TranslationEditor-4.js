@@ -10,6 +10,7 @@
         languages: [],
         allLanguages: [],
         showAllLanguages: false,
+        showLockedFields: false,
         scope: "fields",
         search: "",
         items: [],
@@ -539,8 +540,8 @@
     function loadFieldTranslations() {
         var base = Xrm.Utility.getGlobalContext().getClientUrl() + "/api/data/v9.2/";
         var key = "EntityDefinitions(LogicalName=%27" + encodeURIComponent(state.entityLogicalName) + "%27)";
-        // Simplified: only fetch what we need for HAR-route (no AttributeType/AttributeTypeName)
-        var url = base + key + "/Attributes?$select=LogicalName,DisplayName,Description,MetadataId";
+        // Fetch IsCustomizable and IsRenameable to detect locked fields
+        var url = base + key + "/Attributes?$select=LogicalName,DisplayName,Description,MetadataId,IsCustomizable,IsRenameable";
         
         return fetchJson(url).then(function (result) {
             var items = [];
@@ -549,21 +550,31 @@
                     var attr = result.value[i];
                     if (!attr.LogicalName || !attr.MetadataId) continue;
                     
+                    var baseLabel = labelText(attr.DisplayName, state.orgLcid, attr.LogicalName);
                     var userLabel = labelText(attr.DisplayName, state.userLcid, attr.LogicalName);
                     var targetLabel = labelText(attr.DisplayName, state.targetLcid, "");
                     var userDesc = labelText(attr.Description, state.userLcid, "");
                     var targetDesc = labelText(attr.Description, state.targetLcid, "");
                     
+                    // Check if field is customizable
+                    var isCustomizable = attr.IsCustomizable && attr.IsCustomizable.Value !== false;
+                    var isRenameable = attr.IsRenameable && attr.IsRenameable.Value !== false;
+                    var canModify = isCustomizable && isRenameable;
+                    
                     items.push({
                         id: attr.MetadataId,
                         logicalName: attr.LogicalName,
                         type: "field",
+                        baseLabel: baseLabel,
                         userLabel: userLabel,
                         targetLabel: targetLabel,
                         userDescription: userDesc,
                         targetDescription: targetDesc,
                         newLabel: targetLabel,
-                        newDescription: targetDesc
+                        newDescription: targetDesc,
+                        isCustomizable: isCustomizable,
+                        isRenameable: isRenameable,
+                        canModify: canModify
                     });
                 }
             }
@@ -958,7 +969,7 @@
     function renderShell() {
         var host = document.createElement("div");
         host.id = ROOT_ID;
-        host.innerHTML = "<div class=\"hd\"><div class=\"top\"><div><div class=\"title\">Translation Editor</div><div class=\"sub\" id=\"lu_subtitle\">" + esc(state.entityName) + "</div></div><button class=\"close\" type=\"button\" id=\"lu_close\">Close</button></div><input class=\"search\" id=\"lu_search\" type=\"text\" placeholder=\"Search translations...\"><div class=\"lu-collapse-toggle\" id=\"lu_collapse_toggle\"><span class=\"lu-collapse-title\">⚙️ FILTERS &amp; SETTINGS</span><span class=\"lu-collapse-icon\" id=\"lu_collapse_icon\">▼</span></div><div class=\"lu-collapse-content\" id=\"lu_collapse_content\"><div class=\"lu-switch-row\"><div class=\"lu-switch-label\">Translate</div><div class=\"lu-segmented\"><button class=\"lu-segment active\" data-scope=\"fields\" type=\"button\">Fields</button><button class=\"lu-segment\" data-scope=\"entity\" type=\"button\">Entity</button><button class=\"lu-segment\" data-scope=\"forms\" type=\"button\">Forms</button><button class=\"lu-segment\" data-scope=\"formlabels\" type=\"button\">Form Labels</button><button class=\"lu-segment\" data-scope=\"views\" type=\"button\">Views</button></div></div><div class=\"filter-section\"><div class=\"filter-label\">Target Language</div><select class=\"lang-selector\" id=\"lu_lang_select\"></select><label class=\"chk\" style=\"margin-top:10px;\"><input type=\"checkbox\" id=\"lu_show_all_langs\"> Show all languages (including not provisioned)</label><div class=\"lang-info\" id=\"lu_lang_info\">Loading languages...</div></div><div class=\"filter-section\"><div class=\"filter-label\">Solution Tracking (ALM)</div><label class=\"chk\" style=\"margin-bottom:10px;\"><input type=\"checkbox\" id=\"lu_solution_tracking\"> Track changes in solution</label><select class=\"lang-selector\" id=\"lu_solution_select\" style=\"display:none;\"></select><div class=\"lang-info\" id=\"lu_solution_info\" style=\"display:none;\">Select a solution to automatically add modified components</div></div></div></div><div class=\"toolbar\"><button class=\"btn primary\" type=\"button\" id=\"lu_save\">Save Translations</button><button class=\"btn\" type=\"button\" id=\"lu_refresh\">Refresh</button></div><div class=\"status\" id=\"lu_status\">Loading...</div><div class=\"list\" id=\"lu_list\"></div>";
+        host.innerHTML = "<div class=\"hd\"><div class=\"top\"><div><div class=\"title\">Translation Editor</div><div class=\"sub\" id=\"lu_subtitle\">" + esc(state.entityName) + "</div></div><button class=\"close\" type=\"button\" id=\"lu_close\">Close</button></div><input class=\"search\" id=\"lu_search\" type=\"text\" placeholder=\"Search translations...\"><div class=\"lu-collapse-toggle\" id=\"lu_collapse_toggle\"><span class=\"lu-collapse-title\">⚙️ FILTERS &amp; SETTINGS</span><span class=\"lu-collapse-icon\" id=\"lu_collapse_icon\">▼</span></div><div class=\"lu-collapse-content\" id=\"lu_collapse_content\"><div class=\"lu-switch-row\"><div class=\"lu-switch-label\">Translate</div><div class=\"lu-segmented\"><button class=\"lu-segment active\" data-scope=\"fields\" type=\"button\">Fields</button><button class=\"lu-segment\" data-scope=\"entity\" type=\"button\">Entity</button><button class=\"lu-segment\" data-scope=\"forms\" type=\"button\">Forms</button><button class=\"lu-segment\" data-scope=\"formlabels\" type=\"button\">Form Labels</button><button class=\"lu-segment\" data-scope=\"views\" type=\"button\">Views</button></div></div><div class=\"filter-section\"><div class=\"filter-label\">Target Language</div><select class=\"lang-selector\" id=\"lu_lang_select\"></select><label class=\"chk\" style=\"margin-top:10px;\"><input type=\"checkbox\" id=\"lu_show_all_langs\"> Show all languages (including not provisioned)</label><div class=\"lang-info\" id=\"lu_lang_info\">Loading languages...</div></div><div class=\"filter-section\"><div class=\"filter-label\">Display Options</div><label class=\"chk\"><input type=\"checkbox\" id=\"lu_show_locked\"> Show locked fields (non-customizable)</label></div><div class=\"filter-section\"><div class=\"filter-label\">Solution Tracking (ALM)</div><label class=\"chk\" style=\"margin-bottom:10px;\"><input type=\"checkbox\" id=\"lu_solution_tracking\"> Track changes in solution</label><select class=\"lang-selector\" id=\"lu_solution_select\" style=\"display:none;\"></select><div class=\"lang-info\" id=\"lu_solution_info\" style=\"display:none;\">Select a solution to automatically add modified components</div></div></div></div><div class=\"toolbar\"><button class=\"btn primary\" type=\"button\" id=\"lu_save\">Save Translations</button><button class=\"btn\" type=\"button\" id=\"lu_refresh\">Refresh</button></div><div class=\"status\" id=\"lu_status\">Loading...</div><div class=\"list\" id=\"lu_list\"></div>";
         document.body.appendChild(host);
         
         document.getElementById("lu_close").onclick = removePanel;
@@ -1006,6 +1017,14 @@
                 state.showAllLanguages = this.checked;
                 state.languages = state.showAllLanguages ? state.allLanguages : state.allLanguages.filter(function (l) { return l.provisioned; });
                 updateLanguageDisplay();
+            };
+        }
+        
+        var showLockedCheck = document.getElementById("lu_show_locked");
+        if (showLockedCheck) {
+            showLockedCheck.onchange = function () {
+                state.showLockedFields = this.checked;
+                renderItems(); // Re-render with new filter
             };
         }
         
@@ -1251,7 +1270,27 @@
                            state.scope === "entity" ? "Entity" :
                            state.scope === "forms" ? "Forms" : 
                            state.scope === "formlabels" ? "Form Labels" : "Views";
-            sub.textContent = state.entityName + " | " + scopeText + " | Items: " + state.items.length;
+            
+            // Count locked items for fields scope
+            var totalItems = state.items.length;
+            var lockedCount = 0;
+            if (state.scope === "fields") {
+                for (var i = 0; i < state.items.length; i++) {
+                    if (state.items[i].canModify === false) {
+                        lockedCount++;
+                    }
+                }
+            }
+            
+            var itemText = "Items: " + totalItems;
+            if (lockedCount > 0 && !state.showLockedFields) {
+                var visibleCount = totalItems - lockedCount;
+                itemText = "Items: " + visibleCount + " visible (" + lockedCount + " locked hidden)";
+            } else if (lockedCount > 0) {
+                itemText = "Items: " + totalItems + " (" + lockedCount + " locked)";
+            }
+            
+            sub.textContent = state.entityName + " | " + scopeText + " | " + itemText;
         }
     }
 
@@ -1261,6 +1300,11 @@
     }
 
     function matchItem(item) {
+        // Filter out locked fields unless explicitly shown
+        if (!state.showLockedFields && item.type === "field" && item.canModify === false) {
+            return false;
+        }
+        
         if (!state.search) return true;
         var hay = (item.userLabel + " " + item.logicalName + " " + item.targetLabel + " " + item.type).toLowerCase();
         return hay.indexOf(state.search) >= 0;
@@ -1287,6 +1331,11 @@
                        item.type === "formlabel" ? "Form Label" : item.type;
         html.push("<span class=\"lu-chip lu-chip-type\">" + esc(typeLabel) + "</span>");
         
+        // Show locked indicator for non-customizable fields
+        if (item.type === "field" && item.canModify === false) {
+            html.push("<span class=\"lu-chip lu-chip-locked\" title=\"This field cannot be customized (IsCustomizable or IsRenameable is false)\">🔒 Locked</span>");
+        }
+        
         var hasTranslation = item.targetLabel && item.targetLabel.trim() !== "";
         var statusClass = hasTranslation ? "translated" : "missing";
         var statusText = hasTranslation ? "Translated" : "Missing";
@@ -1297,8 +1346,8 @@
         
         html.push("<div class=\"trans-section\">");
         
-        // Show base language reference for form labels
-        if (item.type === "formlabel" && item.baseLabel) {
+        // Show base language reference for form labels and fields
+        if ((item.type === "formlabel" || item.type === "field") && item.baseLabel) {
             html.push("<div class=\"trans-label\">Reference (" + state.orgLcid + ") - Base Language</div>");
             html.push("<div class=\"trans-text\">" + esc(item.baseLabel || "(empty)") + "</div>");
         }
@@ -1307,7 +1356,8 @@
         html.push("<div class=\"trans-text\">" + esc(item.userLabel || "(empty)") + "</div>");
         
         html.push("<div class=\"trans-label\">Translation (" + state.targetLcid + ")</div>");
-        html.push("<input class=\"input\" type=\"text\" data-id=\"" + esc(item.rowKey || item.id) + "\" data-field=\"label\" value=\"" + esc(item.newLabel || "") + "\" placeholder=\"Enter translation...\">");
+        var disabledAttr = (item.type === "field" && item.canModify === false) ? " disabled title=\"Cannot modify: IsCustomizable or IsRenameable is false\"" : "";
+        html.push("<input class=\"input\" type=\"text\" data-id=\"" + esc(item.rowKey || item.id) + "\" data-field=\"label\" value=\"" + esc(item.newLabel || "") + "\" placeholder=\"Enter translation...\"" + disabledAttr + ">");
         html.push("</div>");
         
         // Always show description for views, forms, and items that have descriptions
@@ -1317,7 +1367,8 @@
             html.push("<div class=\"trans-text\">" + esc(item.userDescription || "(empty)") + "</div>");
             
             html.push("<div class=\"trans-label\">Description Translation (" + state.targetLcid + ")</div>");
-            html.push("<textarea class=\"ta\" data-id=\"" + esc(item.rowKey || item.id) + "\" data-field=\"description\" placeholder=\"Enter description translation...\">" + esc(item.newDescription || "") + "</textarea>");
+            var descDisabledAttr = (item.type === "field" && item.canModify === false) ? " disabled title=\"Cannot modify: IsCustomizable or IsRenameable is false\"" : "";
+            html.push("<textarea class=\"ta\" data-id=\"" + esc(item.rowKey || item.id) + "\" data-field=\"description\" placeholder=\"Enter description translation...\"" + descDisabledAttr + ">" + esc(item.newDescription || "") + "</textarea>");
             html.push("</div>");
         }
         
@@ -1357,6 +1408,12 @@
 
     function onInputChange(e) {
         var el = e.target || e.srcElement;
+        
+        // Ignore changes from disabled fields
+        if (el.disabled) {
+            return;
+        }
+        
         var rowKey = el.getAttribute("data-id");
         var field = el.getAttribute("data-field");
         var value = el.value;
@@ -1364,6 +1421,12 @@
         for (var i = 0; i < state.items.length; i++) {
             var itemKey = state.items[i].rowKey || String(state.items[i].id);
             if (itemKey === rowKey) {
+                // Double-check: don't allow changes to non-customizable fields
+                if (state.items[i].canModify === false) {
+                    console.warn("Attempted to modify locked field:", state.items[i].logicalName);
+                    return;
+                }
+                
                 if (field === "label") {
                     state.items[i].newLabel = value;
                 } else if (field === "description") {
@@ -1830,6 +1893,12 @@
         for (var i = 0; i < updates.length; i++) {
             (function (item) {
                 chain = chain.then(function () {
+                    // Skip non-customizable fields
+                    if (item.canModify === false) {
+                        console.log("  ⚠️ Skipping locked field (not customizable):", item.logicalName);
+                        return;
+                    }
+                    
                     // Fetch current labels to merge
                     var readUrl = base + entityPath + "/Attributes(" + item.id + ")?$select=DisplayName,Description,LogicalName,AttributeType";
                     
